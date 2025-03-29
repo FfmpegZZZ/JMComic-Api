@@ -316,6 +316,13 @@ def get_categories():
         traceback.print_exc()
         return jsonify({"success": False, "message": f"An unexpected server error occurred: {e}"}), 500
 
+@app.route('/docs')
+def redirect_to_docs():
+    """
+    Redirects to the external API documentation.
+    """
+    return redirect("https://jm-api.apifox.cn")
+
 
 if __name__ == '__main__':
     serve(app, host=host, port=port)
