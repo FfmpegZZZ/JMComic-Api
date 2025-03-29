@@ -3,7 +3,7 @@ name: Build and Push Docker Image
 on:
   push:
     branches:
-      - master
+      - develop
   workflow_dispatch:  # 允许手动触发工作流
 
 jobs:
@@ -29,4 +29,4 @@ jobs:
       # Step 4: Build Docker image and push
       - name: Build Docker image
         run: |
-          docker buildx build --platform linux/amd64,linux/arm64 -f Docker/Dockerfile -t orwellz/jmcomic-api:V1.3 -t orwellz/jmcomic-api:latest --push .
+          docker buildx build --platform linux/amd64,linux/arm64 -f Docker/Dockerfile -t orwellz/jmcomic-api:develop --push .
