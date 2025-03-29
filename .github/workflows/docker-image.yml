@@ -29,4 +29,4 @@ jobs:
       # Step 4: Build Docker image and push
       - name: Build Docker image
         run: |
-          docker buildx build --platform linux/amd64,linux/arm64 -f Docker/Dockerfile -t orwellz/jmcomic-api:develop --push .
+          docker buildx build --platform linux/amd64,linux/arm64 -f Docker/Dockerfile -t orwellz/jmcomic-api:V1.3 -t orwellz/jmcomic-api:latest --push .
