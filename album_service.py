@@ -63,7 +63,18 @@ def get_album_pdf_path(jm_album_id, pdf_dir, opt, enable_pwd=True, Titletype=2):
     if not use_cache:
         print(f"开始生成 PDF (加密={enable_pwd}): {pdf_path}")
 
-        webp_floder = str(Path(opt.dir_rule.base_dir) / f"[{jm_album_id}]{title}")
+        base_path = Path(opt.dir_rule.base_dir)
+        found_folders = list(base_path.glob(f"[{jm_album_id}]*"))
+
+        if not found_folders:
+            print(f"错误：在 {base_path} 中找不到 ID 为 {jm_album_id} 的本子文件夹。可能下载未完成或文件系统延迟。")
+            raise FileNotFoundError(f"在 {base_path} 中找不到 ID 为 {jm_album_id} 的本子文件夹")
+        elif len(found_folders) > 1:
+            print(f"警告：找到多个匹配 ID {jm_album_id} 的文件夹，将使用第一个：{found_folders[0]}")
+
+        webp_floder = str(found_folders[0])
+        print(f"找到 WebP 文件夹：{webp_floder}") 
+
         merge_webp_to_pdf(
             webp_floder,
             pdf_path=pdf_path,

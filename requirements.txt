@@ -1,6 +1,6 @@
 Flask>=3.1.0
 jmcomic>=2.5.32
 Pillow>=11.1.0
-PyPDF2>=3.0.1
+PyMuPDF>=1.24.1 # Using a recent version, adjust if needed
 waitress>=3.0.2
 watchdog>=6.0.0
