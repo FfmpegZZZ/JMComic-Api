@@ -1,9 +1,9 @@
 services:
   jmcomic-api:
-    image: orwellz/jmcomic-api:latest
+    build: . # Build the image from the Dockerfile in the current directory (where docker-compose.yml is)
     container_name: jmcomic-api
     ports:
-      - "8699:8699"
+      - "8699:8699" # Map host port 8699 to container port 8699
     volumes:
       - ./pdf:/app/pdf
       - ./webp:/app/webp

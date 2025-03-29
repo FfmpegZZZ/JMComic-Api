@@ -1,26 +1,30 @@
-# 使用官方的 Python 3 Alpine 镜像作为基础镜像
-FROM python:3-alpine
+# Use the official Python 3 Slim image (Debian-based) as a base image
+# Slim images are generally more compatible with pre-built wheels than Alpine
+FROM python:3-slim
 
-# 更新包列表并安装 Git（Alpine 使用 apk 包管理）
-RUN apk update && apk add --no-cache git
+# Set environment variables to prevent interactive prompts during apt-get and improve Python behavior
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-# 设置工作目录
+# Set the working directory
 WORKDIR /app
 
-# 本地build时去掉注释
-# COPY . /app
+# Update apt list and install necessary dependencies if any
+# (Slim might already have most common ones needed for basic wheels)
+# RUN apt-get update && apt-get install -y --no-install-recommends some-package && rm -rf /var/lib/apt/lists/*
 
-# 克隆指定的 Git 仓库
-RUN git clone https://github.com/FfmpegZZZ/JMComic-Api
+# Copy project files into the working directory
+COPY . /app
 
-# 进入克隆的目录
-WORKDIR /app/JMComic-Api
+# Install dependencies using pip
+# --no-cache-dir is good practice for smaller layers
+# --upgrade pip ensures we have the latest pip
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# 安装依赖，并且不缓存依赖包
-RUN pip install --no-cache-dir -r requirements.txt
+# Expose the port the app runs on (matches settings.py)
+EXPOSE 8699
 
-# 删除 Git 包，减小镜像体积
-RUN apk del git
-
-# 设置容器启动时运行的命令（假设是 main.py）
-CMD ["python", "main.py"]
+# 设置容器启动时运行的命令，使用 uvicorn 启动 FastAPI 应用
+# Point to the module and the FastAPI app instance within that module
+CMD ["uvicorn", "jmcomic_api_fast.core.main:app", "--host", "0.0.0.0", "--port", "8699"]
