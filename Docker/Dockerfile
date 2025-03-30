@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     imagemagick \
     qpdf \
     && sed -i 's/<policy domain="coder" rights="none" pattern="PDF" \/>/<policy domain="coder" rights="read|write" pattern="PDF" \/>/' /etc/ImageMagick-6/policy.xml \
-    && sed -i 's/<policy domain="resource" name="memory" value=".*"\/>/<policy domain="resource" name="memory" value="2048MiB"\/>/' /etc/ImageMagick-6/policy.xml \
-    && sed -i 's/<policy domain="resource" name="file" value=".*"\/>/<policy domain="resource" name="file" value="1024"\/>/' /etc/ImageMagick-6/policy.xml \
+    && sed -i 's/<policy domain="resource" name="memory" value=".*"\/>/<policy domain="resource" name="memory" value="8192MiB"\/>/' /etc/ImageMagick-6/policy.xml \
+    && sed -i 's/<policy domain="resource" name="file" value=".*"\/>/<policy domain="resource" name="file" value="512"\/>/' /etc/ImageMagick-6/policy.xml \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files into the working directory
