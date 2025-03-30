@@ -9,9 +9,11 @@ ENV PYTHONUNBUFFERED=1
 # Set the working directory
 WORKDIR /app
 
-# Update apt list and install necessary dependencies if any
-# (Slim might already have most common ones needed for basic wheels)
-# RUN apt-get update && apt-get install -y --no-install-recommends some-package && rm -rf /var/lib/apt/lists/*
+# Update apt list and install necessary dependencies for PDF generation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    imagemagick \
+    qpdf \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy project files into the working directory
 COPY . /app
