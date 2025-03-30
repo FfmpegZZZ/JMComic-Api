@@ -1,10 +1,10 @@
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List
 from itertools import tee
 from enum import Enum
 
 from fastapi import APIRouter, Query, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from jmcomic import JmCategoryPage, JmcomicException
 from jmcomic.jm_config import JmMagicConstants
