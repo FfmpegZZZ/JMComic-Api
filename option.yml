@@ -2,6 +2,12 @@
 # 对日志有需求的可进一步参考文档 → https://jmcomic.readthedocs.io/en/latest/tutorial/11_log_custom/
 log: true
 
+download:
+  cache: true
+  image:
+    decode: true
+    suffix: .jpg 
+
 # 下载文件夹
 dir_rule:
   base_dir: ./webp
