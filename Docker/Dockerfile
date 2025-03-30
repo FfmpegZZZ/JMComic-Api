@@ -10,9 +10,11 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # Update apt list and install necessary dependencies for PDF generation
+# Also, modify ImageMagick policy to allow PDF read/write
 RUN apt-get update && apt-get install -y --no-install-recommends \
     imagemagick \
     qpdf \
+    && sed -i 's/<policy domain="coder" rights="none" pattern="PDF" \/>/<policy domain="coder" rights="read|write" pattern="PDF" \/>/' /etc/ImageMagick-6/policy.xml \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files into the working directory
