@@ -1,10 +1,9 @@
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 from itertools import tee
 
 from fastapi import APIRouter, Query, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from jmcomic import JmSearchPage, JmcomicException
 from ..core.settings import get_jm_client # Import client getter
