@@ -6,7 +6,7 @@ download:
   cache: true
   image:
     decode: true
-    suffix: .jpg 
+    suffix: .jpeg 
 
 # 下载文件夹
 dir_rule:
