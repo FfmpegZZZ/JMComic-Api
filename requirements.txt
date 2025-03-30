@@ -1,7 +1,4 @@
-fastapi>=0.110.0  # Or a specific version you prefer
-uvicorn[standard]>=0.27.0 # Includes standard dependencies like websockets, httptools
-pydantic>=2.5.0 # FastAPI dependency, good practice to include explicitly
+fastapi>=0.115.12
 jmcomic>=2.5.32
-Pillow>=11.1.0
-PyMuPDF>=1.24.1 # Using a recent version, adjust if needed
-watchdog>=6.0.0 # Keep for now, will re-evaluate config watching
+pydantic>=2.11.1
+uvicorn>=0.34.0
