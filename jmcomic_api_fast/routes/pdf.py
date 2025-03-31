@@ -1,208 +1,228 @@
-import base64
 import logging
+import math
+import os
+import asyncio
+import functools
+from pathlib import Path
 
 from fastapi import (
     APIRouter,
     Query,
     HTTPException,
     Path as FastApiPath,
+    BackgroundTasks,
 )
 from fastapi.responses import JSONResponse, FileResponse
 
-# Import necessary components from the new structure
-# Assuming get_album_pdf_path will be adapted or correctly imported
-from ..services.album_service import get_album_pdf_path_async
+# Import project components
+from ..services.album_service import (
+    get_album_image_info_async,
+    get_album_image_paths_in_range_async,
+)
+from ..utils.pdf import _generate_pdf_data # Import the core PDF generation logic
 from ..core.settings import (
     settings,
     get_jm_option,
-    get_jm_client,
-)  # Import necessary settings and client getter
+    get_process_pool, # Needed for running img2pdf in a separate process
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/pdf",  # Prefix for all routes in this router
-    tags=["PDF"],  # Tag for API documentation
+    prefix="/pdf",
+    tags=["PDF Sharding"], # Updated tag
 )
+
+# Helper function to remove file in background
+async def _cleanup_temp_file(file_path: Path):
+    try:
+        if file_path.exists():
+            os.remove(file_path)
+            logger.info(f"临时分片文件已清理: {file_path}")
+    except OSError as e:
+        logger.error(f"清理临时分片文件失败 {file_path}: {e}")
 
 
 @router.get(
-    "/path/{jm_album_id}",
-    summary="Get the absolute path of the generated PDF for an album",
-    response_description="JSON object containing the success status, message, absolute path, and filename",
+    "/info/{jm_album_id}",
+    summary="Get PDF sharding info for an album",
+    response_description="JSON object with total pages, shard size, and shard list",
 )
-async def get_pdf_file_path(
+async def get_pdf_info(
     jm_album_id: str = FastApiPath(
         ..., title="JMComic Album ID", description="The unique ID of the JMComic album"
     ),
-    passwd: str = Query(
-        "true",
-        title="Password Protection Flag",
-        description="Whether the PDF should be password protected ('true' or 'false')",
-    ),
-    Titletype: int = Query(
-        1, title="Title Type", description="Type of title naming convention (integer)"
-    ),  # Note: FastAPI converts query params to specified type
+    # shard_size parameter removed, fixed to 100
 ):
     """
-    Retrieves the absolute local filesystem path for a generated PDF corresponding to a JMComic album ID.
-    Downloads the album and generates the PDF if it doesn't exist.
+    Retrieves information needed for PDF sharding (fixed at 100 pages per shard),
+    including total pages and calculated shard ranges.
+    Downloads album images if not found locally.
     """
-    enable_pwd = passwd.lower() not in ("false", "0")
-    opt = get_jm_option()  # Get the currently loaded JmOption
-    pdf_dir = settings.resolved_pdf_dir  # Get the resolved PDF directory path
-    client = get_jm_client()  # Get client instance
-
+    opt = get_jm_option()
+    shard_size = 100 # Hardcoded shard size
     try:
-        # Use the async version of get_album_pdf_path
-        path_obj, name = await get_album_pdf_path_async(
-            jm_album_id,
-            pdf_dir,
-            opt,
-            client,
-            enable_pwd=enable_pwd,
-            Titletype=Titletype,
+        # Get total pages (image count) and album title
+        total_pages, _, title = await get_album_image_info_async(
+            jm_album_id, opt, ensure_downloaded=True
         )
 
-        if path_obj is None or not path_obj.exists():
-            logger.warning(
-                f"PDF not found or generation failed for album {jm_album_id}"
-            )
-            raise HTTPException(
-                status_code=404, detail="PDF file not found or could not be generated."
+        if total_pages == 0:
+             logger.warning(f"专辑 {jm_album_id} 没有找到图片，无法提供分片信息。")
+             # Return info indicating zero pages, client should handle this
+             return JSONResponse(
+                content={
+                    "success": True,
+                    "message": "Album found, but contains no images.",
+                    "data": {
+                        "jm_album_id": jm_album_id,
+                        "title": title,
+                        "total_pages": 0,
+                        "shard_size": 100, # Hardcoded
+                        "shards": [],
+                    },
+                }
             )
 
-        abspath = str(path_obj.resolve())  # Get absolute path as string
-        logger.info(f"Successfully retrieved path for PDF: {name} ({abspath})")
+        # Calculate shard information (using fixed size 100)
+        num_shards = math.ceil(total_pages / 100)
+        shards = []
+        for i in range(num_shards):
+            start_page = i * 100 + 1
+            end_page = min((i + 1) * 100, total_pages)
+            shards.append(
+                {"shard_index": i + 1, "start_page": start_page, "end_page": end_page}
+            )
+
+        logger.info(f"为专辑 {jm_album_id} ({title}) 生成分片信息: {total_pages} 页, {num_shards} 个分片 (大小 100)")
 
         return JSONResponse(
             content={
                 "success": True,
-                "message": "PDF path retrieved successfully",
-                "data": abspath,
-                "name": name,
+                "message": "PDF shard info retrieved successfully",
+                "data": {
+                    "jm_album_id": jm_album_id,
+                    "title": title,
+                    "total_pages": total_pages,
+                    "shard_size": 100, # Hardcoded
+                    "shards": shards,
+                },
             }
         )
-    except HTTPException as http_exc:
-        raise http_exc  # Re-raise FastAPI specific exceptions
+    except FileNotFoundError:
+        logger.warning(f"请求信息时未找到专辑 {jm_album_id}")
+        raise HTTPException(status_code=404, detail=f"Album {jm_album_id} not found.")
     except Exception as e:
-        logger.exception(
-            f"Error in get_pdf_file_path for {jm_album_id}: {e}"
-        )  # Log full traceback
+        logger.exception(f"获取专辑 {jm_album_id} 的 PDF 信息时出错: {e}")
         raise HTTPException(
-            status_code=500,
-            detail=f"An unexpected server error occurred while getting PDF path.",
+            status_code=500, detail="Server error retrieving PDF shard info."
         )
 
 
 @router.get(
-    "/{jm_album_id}",
-    summary="Get the PDF file for an album, either as Base64 or direct download",
-    response_description="Either a JSON object with Base64 encoded PDF data or a direct PDF file download",
+    "/shard/{jm_album_id}/{shard_index}",
+    summary="Get a specific PDF shard for an album",
+    response_description="A PDF file containing the requested page range",
+    response_class=FileResponse, # Directly return the file
 )
-async def get_pdf_file(
+async def get_pdf_shard(
+    background_tasks: BackgroundTasks,
     jm_album_id: str = FastApiPath(
         ..., title="JMComic Album ID", description="The unique ID of the JMComic album"
     ),
-    passwd: str = Query(
-        "true",
-        title="Password Protection Flag",
-        description="Whether the PDF should be password protected ('true' or 'false')",
+    shard_index: int = FastApiPath(
+        ..., gt=0, title="Shard Index", description="The 1-based index of the shard to retrieve"
     ),
-    Titletype: int = Query(
-        1, title="Title Type", description="Type of title naming convention (integer)"
-    ),
-    output_pdf_directly: bool = Query(
-        False,
-        alias="pdf",
-        title="Direct PDF Output",
-        description="If true, return the PDF file directly for download. If false, return JSON with Base64 data.",
-    ),
+    # shard_size parameter removed, fixed to 100
 ):
     """
-    Retrieves the PDF file for a JMComic album.
-    - If `pdf=true`, returns the file directly for download.
-    - If `pdf=false` (default), returns a JSON response containing the filename and Base64 encoded PDF data.
-    Downloads the album and generates the PDF if it doesn't exist.
+    Retrieves a specific shard (a PDF file containing a range of pages, fixed at 100 pages per shard)
+    for the given album ID. Uses cached shard if available, otherwise generates it on demand.
     """
-    enable_pwd = passwd.lower() not in ("false", "0")
     opt = get_jm_option()
-    pdf_dir = settings.resolved_pdf_dir
-    client = get_jm_client()
+    shard_size = 100 # Hardcoded shard size
+    cache_dir = settings.resolved_pdf_shard_cache_dir / jm_album_id
+    cache_dir.mkdir(parents=True, exist_ok=True) # Ensure album-specific cache dir exists
+    # Simplified cache filename (shard size is fixed)
+    cache_filename = f"shard_{shard_index}.pdf"
+    cache_path = cache_dir / cache_filename
 
+    # 1. Check cache first
+    if cache_path.exists():
+        logger.info(f"缓存命中: 返回缓存的分片 {cache_path}")
+        return FileResponse(path=cache_path, filename=cache_filename, media_type="application/pdf")
+
+    # 2. Cache miss: Get info and generate shard
+    logger.info(f"缓存未命中: 专辑 {jm_album_id}, 分片 {shard_index} (大小 {shard_size})。正在生成...") # Log still uses variable
     try:
-        # Use the async version of get_album_pdf_path
-        path_obj, name = await get_album_pdf_path_async(
-            jm_album_id,
-            pdf_dir,
-            opt,
-            client,
-            enable_pwd=enable_pwd,
-            Titletype=Titletype,
+        total_pages, image_folder_path, title = await get_album_image_info_async(
+            jm_album_id, opt, ensure_downloaded=True # Ensure images are there
         )
 
-        if path_obj is None or not path_obj.exists():
-            logger.warning(
-                f"PDF not found or generation failed for album {jm_album_id} before sending."
-            )
+        # Validate shard_index (using fixed size 100)
+        num_shards = math.ceil(total_pages / shard_size) # Use variable for calculation
+        if not (1 <= shard_index <= num_shards):
+            logger.warning(f"无效的分片索引请求: {shard_index} (总共 {num_shards} 个分片, 大小 {shard_size})")
             raise HTTPException(
-                status_code=404, detail="PDF file not found or could not be generated."
+                status_code=404,
+                detail=f"Invalid shard index {shard_index}. Valid range is 1 to {num_shards} for shard size {shard_size}.",
             )
 
-        if output_pdf_directly:
-            logger.info(f"Serving PDF file directly: {name}")
-            # Return the file directly
-            return FileResponse(
-                path=path_obj, filename=name, media_type="application/pdf"
+        # Calculate page range for this shard (using fixed size 100)
+        start_page = (shard_index - 1) * shard_size + 1 # Use variable for calculation
+        end_page = min(shard_index * shard_size, total_pages) # Use variable for calculation
+
+        # Get image paths for the range
+        image_paths = await get_album_image_paths_in_range_async(
+            image_folder_path, total_pages, start_page, end_page
+        )
+
+        if not image_paths:
+            logger.error(f"在范围 {start_page}-{end_page} 内没有找到图片文件，无法生成分片 {shard_index}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"No images found for page range {start_page}-{end_page} in shard {shard_index}.",
             )
-        else:
-            # Return Base64 encoded data in JSON
-            try:
-                logger.info(f"Encoding PDF to Base64: {name}")
 
-                # Read file in chunks to avoid loading large files entirely into memory
-                async def read_file_in_chunks(file_path, chunk_size=65536):
-                    with open(file_path, "rb") as f:
-                        while chunk := f.read(chunk_size):
-                            yield chunk
+        # Generate PDF data using the utility function in a process pool
+        process_pool = get_process_pool()
+        loop = asyncio.get_event_loop()
+        image_paths_str = [str(p) for p in image_paths] # Convert Path objects to strings
 
-                # Use background task for large file encoding
-                encoded_pdf = ""
+        logger.info(f"使用 {len(image_paths_str)} 张图片生成分片 {shard_index}...")
+        pdf_data = await loop.run_in_executor(
+             process_pool,
+             functools.partial(_generate_pdf_data, image_paths_str)
+        )
 
-                # For smaller files, we can do it directly
-                if path_obj.stat().st_size < 10 * 1024 * 1024:  # Less than 10MB
-                    with open(path_obj, "rb") as f:
-                        encoded_pdf = base64.b64encode(f.read()).decode("utf-8")
-                else:
-                    # For larger files, we'll use a background task
-                    # This is a simplified approach - for very large files, consider
-                    # streaming the response or using a task queue system
-                    chunks = []
-                    async for chunk in read_file_in_chunks(path_obj):
-                        chunks.append(chunk)
-                    encoded_pdf = base64.b64encode(b"".join(chunks)).decode("utf-8")
+        # Save generated data to cache
+        try:
+            with open(cache_path, "wb") as f:
+                f.write(pdf_data)
+            logger.info(f"分片已生成并缓存: {cache_path}")
+        except IOError as e:
+            logger.exception(f"无法写入缓存文件 {cache_path}: {e}")
+            # If saving fails, maybe return data directly? Or raise 500?
+            # For now, raise 500 as the cache save failed.
+            raise HTTPException(status_code=500, detail="Failed to save generated PDF shard.")
 
-                logger.info(f"Successfully encoded PDF: {name}")
-                return JSONResponse(
-                    content={
-                        "success": True,
-                        "message": "PDF retrieved successfully (Base64)",
-                        "name": name,
-                        "data": encoded_pdf,
-                    }
-                )
-            except Exception as e:
-                logger.exception(f"Error reading/encoding PDF for {jm_album_id}: {e}")
-                raise HTTPException(
-                    status_code=500, detail=f"Error reading or encoding PDF file."
-                )
+        # Return the newly created cache file
+        # Note: We are not using background task to delete, assuming persistent cache.
+        return FileResponse(path=cache_path, filename=cache_filename, media_type="application/pdf")
 
+    except FileNotFoundError as e:
+        logger.warning(f"请求分片时未找到专辑 {jm_album_id} 或其图片: {e}")
+        raise HTTPException(status_code=404, detail=f"Album {jm_album_id} or required images not found.")
     except HTTPException as http_exc:
-        # Re-raise HTTPExceptions directly
-        raise http_exc
+         raise http_exc # Re-raise specific HTTP exceptions
     except Exception as e:
-        logger.exception(f"Error in get_pdf_file for {jm_album_id}: {e}")
+        logger.exception(f"生成或提供分片 {shard_index} (专辑 {jm_album_id}) 时出错: {e}")
+        # Clean up potentially incomplete cache file if generation failed before saving
+        if not cache_path.exists() and 'pdf_data' in locals(): # Check if generation succeeded but saving failed
+             pass # Already handled above
+        elif cache_path.exists(): # If file exists but some other error occurred after saving attempt
+             # Maybe remove it? Or leave it? Let's leave it for now.
+             pass
         raise HTTPException(
-            status_code=500,
-            detail=f"An unexpected server error occurred while getting PDF file.",
+            status_code=500, detail="Server error generating or serving PDF shard."
         )

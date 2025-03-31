@@ -13,11 +13,12 @@ from jmcomic import download_album, JmApiClient, JmOption, JmAlbumDetail
 from ..utils.pdf import merge_webp_to_pdf_async
 from ..utils.file import IsJmBookExist
 from ..core.settings import (
-    get_process_pool,
+    get_process_pool, # Keep for potential future use or if pdf utils still use it
     get_thread_pool,
     get_download_semaphore,
-    get_pdf_semaphore,
+    # get_pdf_semaphore, # No longer generating full PDFs here directly
 )
+# from ..utils.file import ensure_path_suffix # Removed unused import
 
 logger = logging.getLogger(__name__)
 
@@ -147,22 +148,34 @@ async def get_album_pdf_path_async(
             logger.error(
                 f"无法找到缓存的专辑文件夹，以 '{folder_prefix}' 开头，在 {base_path}"
             )
+            # Consider if we should attempt download here if ensure_downloaded is True?
+            # For now, assume if IsJmBookExist found it, the folder should exist.
             raise FileNotFoundError(
-                f"缓存的专辑文件夹 ID {jm_album_id} 在 {base_path} 未找到"
+                f"缓存的专辑文件夹 ID {jm_album_id} 在 {base_path} 未找到，尽管 IsJmBookExist 报告存在。"
             )
         logger.info(f"找到缓存的WebP文件夹: {webp_folder_path}")
 
     # 确保标题不为None（如果找到缓存版本）
-    if title is None:
+    if title is None and webp_folder_path: # Check webp_folder_path exists
         try:
             first_bracket_index = webp_folder_path.name.find("]")
             if first_bracket_index != -1:
                 title = webp_folder_path.name[first_bracket_index + 1 :].strip()
                 logger.info(f"从缓存的文件夹名称提取标题: {title}")
             else:
-                title = f"Unknown Title {jm_album_id}"
-        except Exception:
-            title = f"Unknown Title {jm_album_id}"
+                title = f"Unknown Title {jm_album_id}" # Fallback title
+        except Exception as e:
+            logger.warning(f"从文件夹名称提取标题失败: {e}")
+            title = f"Unknown Title {jm_album_id}" # Fallback title
+    elif title is None:
+         # This case should ideally not happen if folder finding logic is correct
+         logger.warning(f"无法确定专辑 {jm_album_id} 的标题。")
+         title = f"Unknown Title {jm_album_id}" # Fallback title
+
+
+    # --- Start: Logic specific to get_album_pdf_path_async ---
+    # This part generates the full PDF path and potentially the PDF itself.
+    # We keep it for now but won't use it for sharding.
 
     # 2. 根据Titletype确定PDF文件名
     if Titletype == 0:
@@ -239,9 +252,168 @@ async def get_album_pdf_path_async(
         finally:
             gc.collect()
             logger.debug("PDF生成尝试后触发垃圾回收。")
+    # --- End: Logic specific to get_album_pdf_path_async ---
 
     # 5. 返回路径对象和文件名
     return pdf_path_obj, pdf_filename
+
+
+# --- New Functions for Sharding ---
+
+async def get_album_image_info_async(
+    jm_album_id: str,
+    opt: JmOption,
+    ensure_downloaded: bool = True,
+) -> Tuple[int, Path, str]:
+    """
+    异步获取相册图片信息（总数、文件夹路径、标题）。
+
+    :param jm_album_id: 漫画ID
+    :param opt: JmOption配置
+    :param ensure_downloaded: 如果为True，则在本地未找到时下载相册
+    :return: 元组 (总图片数, 图片文件夹路径, 相册标题)
+    :raises FileNotFoundError: 如果相册未找到且ensure_downloaded为False，或下载失败/文件夹未找到
+    """
+    logger.info(f"异步请求图片信息: 专辑 {jm_album_id}, ensure_downloaded={ensure_downloaded}")
+
+    image_folder_path: Optional[Path] = None
+    title: Optional[str] = None
+    base_path = Path(opt.dir_rule.base_dir)
+    folder_prefix = f"[{jm_album_id}]"
+
+    # 1. 检查本地是否存在，如果需要则下载
+    title = IsJmBookExist(base_path, jm_album_id)
+    if title is None:
+        if not ensure_downloaded:
+            logger.warning(f"专辑 {jm_album_id} 未在本地找到，且未要求下载。")
+            raise FileNotFoundError(f"专辑 {jm_album_id} 未在本地找到。")
+
+        logger.info(f"专辑 {jm_album_id} 未在本地找到，开始下载。")
+        try:
+            album, _ = await download_album_async(jm_album_id, opt)
+            title = album.title
+            logger.info(f"专辑 {jm_album_id} 下载成功。标题: {title}")
+
+            # 查找下载路径
+            image_folder_path = find_folder_by_prefix(base_path, folder_prefix)
+            if image_folder_path is None:
+                logger.error(f"下载后未能找到文件夹 '{folder_prefix}' 在 {base_path}")
+                raise FileNotFoundError(f"下载的专辑文件夹 {jm_album_id} 在 {base_path} 未找到")
+            logger.info(f"找到下载的文件夹: {image_folder_path}")
+
+        except Exception as e:
+            logger.exception(f"下载或查找专辑 {jm_album_id} 失败: {e}")
+            raise
+    else:
+        logger.info(f"专辑 {jm_album_id} 在本地找到: {title}，使用现有文件。")
+        image_folder_path = find_folder_by_prefix(base_path, folder_prefix)
+        if image_folder_path is None:
+            logger.error(f"无法找到缓存的专辑文件夹 '{folder_prefix}' 在 {base_path}")
+            # This might indicate an inconsistency if IsJmBookExist returned a title
+            raise FileNotFoundError(f"缓存的专辑文件夹 {jm_album_id} 在 {base_path} 未找到")
+        logger.info(f"找到缓存的图片文件夹: {image_folder_path}")
+
+    # 确保标题有效
+    if title is None and image_folder_path:
+        try:
+            first_bracket_index = image_folder_path.name.find("]")
+            if first_bracket_index != -1:
+                title = image_folder_path.name[first_bracket_index + 1 :].strip()
+            else: title = f"Unknown Title {jm_album_id}"
+        except Exception: title = f"Unknown Title {jm_album_id}"
+    elif title is None:
+        title = f"Unknown Title {jm_album_id}"
+
+
+    # 2. 计算图片总数
+    if not image_folder_path or not image_folder_path.is_dir():
+        logger.error(f"图片文件夹路径无效或不是目录: {image_folder_path}")
+        raise FileNotFoundError(f"无效的图片源文件夹路径: {image_folder_path}")
+
+    try:
+        # 使用 glob 高效查找所有 .jpeg 文件
+        image_files = list(image_folder_path.glob("*.jpeg"))
+        total_images = len(image_files)
+        logger.info(f"在 {image_folder_path} 中找到 {total_images} 个 .jpeg 文件")
+        if total_images == 0:
+             logger.warning(f"警告：在文件夹 {image_folder_path} 中没有找到 .jpeg 文件。")
+
+    except Exception as e:
+        logger.exception(f"列出或计数图片文件时出错 {image_folder_path}: {e}")
+        raise RuntimeError(f"无法计数图片文件在 {image_folder_path}")
+
+    return total_images, image_folder_path, title
+
+
+async def get_album_image_paths_in_range_async(
+    image_folder_path: Path,
+    total_images: int, # Pass total images to avoid recounting
+    start_page: int,    # 1-based index
+    end_page: int,      # 1-based index
+) -> List[Path]:
+    """
+    异步获取指定页面范围内的图片文件路径列表。
+    假设图片已下载且按顺序命名（例如 001.jpeg, 002.jpeg ...）。
+
+    :param image_folder_path: 包含图片的文件夹路径。
+    :param total_images: 该文件夹中的图片总数。
+    :param start_page: 开始页码（包含，基于1）。
+    :param end_page: 结束页码（包含，基于1）。
+    :return: 范围内图片路径的 Path 对象列表。
+    :raises ValueError: 如果页面范围无效。
+    :raises FileNotFoundError: 如果预期的图片文件丢失。
+    """
+    logger.info(f"请求图片路径范围: {start_page}-{end_page} 在 {image_folder_path}")
+
+    if not image_folder_path.is_dir():
+         raise FileNotFoundError(f"图片文件夹不存在: {image_folder_path}")
+
+    # 验证页面范围
+    start_page = max(1, start_page)
+    end_page = min(total_images, end_page)
+
+    if start_page > end_page:
+        logger.warning(f"无效的页面范围请求: start={start_page}, end={end_page}, total={total_images}")
+        return [] # 返回空列表表示范围内没有有效页面
+
+    image_paths = []
+    missing_files = []
+
+    # 确定文件名的填充宽度 (例如，001 vs 0001)
+    # 尝试查找第一个和最后一个预期的文件来猜测填充
+    first_expected_name = f"{1:03d}.jpeg" # Assume 3 digits first
+    last_expected_name = f"{total_images:03d}.jpeg"
+    padding = 3
+    if not (image_folder_path / first_expected_name).exists() and not (image_folder_path / last_expected_name).exists():
+         # Try 4 digits if 3 digits don't seem right
+         first_expected_name_4 = f"{1:04d}.jpeg"
+         last_expected_name_4 = f"{total_images:04d}.jpeg"
+         if (image_folder_path / first_expected_name_4).exists() or (image_folder_path / last_expected_name_4).exists():
+              padding = 4
+              logger.debug("检测到图片文件名使用4位数字填充。")
+         else:
+              # Fallback or further detection needed? For now, stick to 3 or log warning.
+              logger.warning(f"无法确定 {image_folder_path} 中图片文件名的填充宽度，假设为3。")
+
+
+    for i in range(start_page, end_page + 1):
+        # 假设文件名是数字填充的，例如 001.jpeg, 002.jpeg ...
+        filename = f"{i:0{padding}d}.jpeg" # Use detected padding
+        file_path = image_folder_path / filename
+        if file_path.exists():
+            image_paths.append(file_path)
+        else:
+            logger.warning(f"预期的图片文件未找到: {file_path}")
+            missing_files.append(filename)
+
+    # Decide how to handle missing files. For now, log and return what was found.
+    # Optionally, raise an error if any file in the requested range is missing.
+    if missing_files:
+         logger.error(f"在请求的范围 {start_page}-{end_page} 内缺少以下文件: {missing_files}")
+         # raise FileNotFoundError(f"缺少范围内的图片文件: {missing_files}") # Uncomment to be strict
+
+    logger.info(f"找到 {len(image_paths)} 个图片路径，范围 {start_page}-{end_page}")
+    return image_paths
 
 
 # 保留原始同步函数以兼容旧代码

@@ -16,7 +16,9 @@ class Settings(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8699
     option_file: str = "./option.yml"  # Relative to project root
-    pdf_dir: str = "./pdf"  # Relative to project root
+    pdf_dir: str = "./pdf"  # Relative to project root for *original* full PDFs (if kept)
+    pdf_shard_cache_dir: str = "./pdf_cache" # Relative to project root for cached shards
+    default_pdf_shard_size: int = 50 # Default number of pages per shard
 
     # Concurrency settings
     max_workers: int = max(
@@ -46,6 +48,12 @@ class Settings(BaseModel):
         path.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
         return path
 
+    @property
+    def resolved_pdf_shard_cache_dir(self) -> Path:
+        project_root = Path(__file__).parent.parent.parent
+        path = project_root / self.pdf_shard_cache_dir
+        path.mkdir(parents=True, exist_ok=True) # Ensure cache directory exists
+        return path
 
 # --- Global Settings Instance ---
 # Load settings (currently uses defaults defined above)
