@@ -379,26 +379,16 @@ async def get_album_image_paths_in_range_async(
     image_paths = []
     missing_files = []
 
-    # 确定文件名的填充宽度 (例如，001 vs 0001)
-    # 尝试查找第一个和最后一个预期的文件来猜测填充
-    first_expected_name = f"{1:03d}.jpeg" # Assume 3 digits first
-    last_expected_name = f"{total_images:03d}.jpeg"
-    padding = 3
-    if not (image_folder_path / first_expected_name).exists() and not (image_folder_path / last_expected_name).exists():
-         # Try 4 digits if 3 digits don't seem right
-         first_expected_name_4 = f"{1:04d}.jpeg"
-         last_expected_name_4 = f"{total_images:04d}.jpeg"
-         if (image_folder_path / first_expected_name_4).exists() or (image_folder_path / last_expected_name_4).exists():
-              padding = 4
-              logger.debug("检测到图片文件名使用4位数字填充。")
-         else:
-              # Fallback or further detection needed? For now, stick to 3 or log warning.
-              logger.warning(f"无法确定 {image_folder_path} 中图片文件名的填充宽度，假设为3。")
-
+    # 文件名固定使用 5 位数字填充 (e.g., 00001.jpeg)
+    padding = 5
+    logger.info(f"将使用固定的 {padding} 位填充来查找范围 {start_page}-{end_page} 的图片。")
 
     for i in range(start_page, end_page + 1):
-        # 假设文件名是数字填充的，例如 001.jpeg, 002.jpeg ...
-        filename = f"{i:0{padding}d}.jpeg" # Use detected padding
+        # 构建文件名
+        filename = f"{i:0{padding}d}.jpeg" # Use fixed padding
+        file_path = image_folder_path / filename
+        if file_path.exists():
+            image_paths.append(file_path)
         file_path = image_folder_path / filename
         if file_path.exists():
             image_paths.append(file_path)

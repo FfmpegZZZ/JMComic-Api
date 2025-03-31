@@ -1,6 +1,4 @@
-# Use the official Python 3 Slim image (Debian-based) as a base image
-# Slim images are generally more compatible with pre-built wheels than Alpine
-FROM python:3-slim
+FROM python:3-alpine
 
 # Set environment variables to prevent interactive prompts during apt-get and improve Python behavior
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -8,16 +6,6 @@ ENV PYTHONUNBUFFERED=1
 
 # Set the working directory
 WORKDIR /app
-
-# Update apt list and install necessary dependencies for PDF generation
-# Also, modify ImageMagick policy to allow PDF read/write, increase memory limit, and increase file limit
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    imagemagick \
-    qpdf \
-    && sed -i 's/<policy domain="coder" rights="none" pattern="PDF" \/>/<policy domain="coder" rights="read|write" pattern="PDF" \/>/' /etc/ImageMagick-6/policy.xml \
-    && sed -i 's/<policy domain="resource" name="memory" value=".*"\/>/<policy domain="resource" name="memory" value="8192MiB"\/>/' /etc/ImageMagick-6/policy.xml \
-    && sed -i 's/<policy domain="resource" name="file" value=".*"\/>/<policy domain="resource" name="file" value="512"\/>/' /etc/ImageMagick-6/policy.xml \
-    && rm -rf /var/lib/apt/lists/*
 
 # Copy project files into the working directory
 COPY . /app
