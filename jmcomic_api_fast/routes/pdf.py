@@ -3,6 +3,7 @@ import math
 import os
 import asyncio
 import functools
+import base64 # <-- Import base64
 from pathlib import Path
 
 from fastapi import (
@@ -121,12 +122,10 @@ async def get_pdf_info(
 
 @router.get(
     "/shard/{jm_album_id}/{shard_index}",
-    summary="Get a specific PDF shard for an album",
-    response_description="A PDF file containing the requested page range",
-    response_class=FileResponse, # Directly return the file
+    summary="Get a specific PDF shard for an album as Base64", # Updated summary
+    response_description="JSON object containing the Base64 encoded PDF shard", # Updated description
 )
 async def get_pdf_shard(
-    background_tasks: BackgroundTasks,
     jm_album_id: str = FastApiPath(
         ..., title="JMComic Album ID", description="The unique ID of the JMComic album"
     ),
@@ -149,11 +148,36 @@ async def get_pdf_shard(
 
     # 1. Check cache first
     if cache_path.exists():
-        logger.info(f"缓存命中: 返回缓存的分片 {cache_path}")
-        return FileResponse(path=cache_path, filename=cache_filename, media_type="application/pdf")
+        logger.info(f"缓存命中: 读取缓存的分片 {cache_path}")
+        try:
+            # Need title even for cache hit
+            _, _, title = await get_album_image_info_async(
+                jm_album_id, opt, ensure_downloaded=False # Don't force download if only getting title
+            )
+            with open(cache_path, "rb") as f:
+                pdf_content = f.read()
+            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
+            logger.info(f"成功读取并编码缓存的分片 {shard_index} (专辑 {jm_album_id})")
+            # Return JSON with base64 data
+            return JSONResponse(
+                content={
+                    "title": title, # Changed key from name to title
+                    "success": True,
+                    "message": "PDF shard found in cache and encoded.",
+                    "shard_index": shard_index, # Add shard index
+                    "data": pdf_base64, # Base64 data
+                }
+            )
+        except FileNotFoundError:
+             logger.warning(f"缓存命中但获取标题时未找到专辑 {jm_album_id}，继续生成流程。")
+             # Proceed to cache miss logic if title fetch fails unexpectedly
+        except Exception as e:
+            logger.exception(f"读取或编码缓存文件 {cache_path} 时出错: {e}")
+            raise HTTPException(status_code=500, detail="Error processing cached PDF shard.")
+
 
     # 2. Cache miss: Get info and generate shard
-    logger.info(f"缓存未命中: 专辑 {jm_album_id}, 分片 {shard_index} (大小 {shard_size})。正在生成...") # Log still uses variable
+    logger.info(f"缓存未命中: 专辑 {jm_album_id}, 分片 {shard_index} (大小 {shard_size})。正在生成...")
     try:
         total_pages, image_folder_path, title = await get_album_image_info_async(
             jm_album_id, opt, ensure_downloaded=True # Ensure images are there
@@ -206,9 +230,20 @@ async def get_pdf_shard(
             # For now, raise 500 as the cache save failed.
             raise HTTPException(status_code=500, detail="Failed to save generated PDF shard.")
 
-        # Return the newly created cache file
-        # Note: We are not using background task to delete, assuming persistent cache.
-        return FileResponse(path=cache_path, filename=cache_filename, media_type="application/pdf")
+        # Encode the generated data to Base64
+        pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
+        logger.info(f"成功生成并编码分片 {shard_index} (专辑 {jm_album_id})")
+
+        # Return JSON with base64 data
+        return JSONResponse(
+            content={
+                "title": title, # Changed key from name to title
+                "success": True,
+                "message": "PDF shard generated and encoded successfully.",
+                "shard_index": shard_index, # Add shard index
+                "data": pdf_base64, # Base64 data
+            }
+        )
 
     except FileNotFoundError as e:
         logger.warning(f"请求分片时未找到专辑 {jm_album_id} 或其图片: {e}")
