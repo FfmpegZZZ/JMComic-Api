@@ -6,7 +6,6 @@ from fastapi import (
     Query,
     HTTPException,
     Path as FastApiPath,
-    BackgroundTasks,
 )
 from fastapi.responses import JSONResponse, FileResponse
 
@@ -102,7 +101,6 @@ async def get_pdf_file_path(
     response_description="Either a JSON object with Base64 encoded PDF data or a direct PDF file download",
 )
 async def get_pdf_file(
-    background_tasks: BackgroundTasks,
     jm_album_id: str = FastApiPath(
         ..., title="JMComic Album ID", description="The unique ID of the JMComic album"
     ),

@@ -84,7 +84,6 @@ async def get_album_pdf_path_async(
     jm_album_id: str,
     pdf_dir: Path,
     opt: JmOption,
-    client: JmApiClient,
     enable_pwd: bool = True,
     Titletype: int = 2,
 ) -> Tuple[Path, str]:

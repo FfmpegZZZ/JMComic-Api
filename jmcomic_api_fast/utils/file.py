@@ -30,5 +30,5 @@ def IsJmBookExist(path, jm_album_id):
             first_bracket_index = item.name.find(']')
             if first_bracket_index != -1:
                 return item.name[first_bracket_index + 1:].strip()
-            return None 
+            return None
     return None
