@@ -2,3 +2,4 @@ __pycache__/
 utils/__pycache__/
 pdf/
 webp/
+test_api_client.py

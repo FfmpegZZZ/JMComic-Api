@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Tuple, List, Optional
 
 # 导入 jmcomic 相关
-from jmcomic import download_album, JmApiClient, JmOption, JmAlbumDetail
-
+from jmcomic import download_album, JmApiClient, JmHtmlClient, JmOption, JmAlbumDetail, JmcomicException # 导入 JmAlbumDetail, 客户端类和异常基类
+from jmcomic.jm_toolkit import ExceptionTool # 可能需要用于错误处理
 # 导入项目内部工具函数
 from ..utils.pdf import merge_webp_to_pdf_async
 from ..utils.file import IsJmBookExist
@@ -16,11 +16,10 @@ from ..core.settings import (
     get_process_pool, # Keep for potential future use or if pdf utils still use it
     get_thread_pool,
     get_download_semaphore,
+    logger, # 导入 logger
     # get_pdf_semaphore, # No longer generating full PDFs here directly
 )
 # from ..utils.file import ensure_path_suffix # Removed unused import
-
-logger = logging.getLogger(__name__)
 
 
 def list_directory_contents(dir_path: Path) -> List[str]:
@@ -259,6 +258,71 @@ async def get_album_pdf_path_async(
 
 
 # --- New Functions for Sharding ---
+
+async def get_album_metadata_async(jm_album_id: str, opt: JmOption) -> Tuple[int, str]:
+    """
+    异步获取相册元数据（总页数、标题），不下载图片。
+    优先使用 JmApiClient。
+
+    :param jm_album_id: 漫画ID
+    :param opt: JmOption配置
+    :return: 元组 (总页数, 标题)
+    :raises JmcomicException: 如果 jmcomic 库获取元数据失败 (例如网络错误或专辑不存在)
+    :raises Exception: 其他意外错误
+    """
+    logger.info(f"异步请求元数据: 专辑 {jm_album_id} (仅信息，不下载)")
+    loop = asyncio.get_event_loop()
+    thread_pool = get_thread_pool()
+
+    def _get_metadata_sync():
+        client = None
+        try:
+            # 改为使用 JmHtmlClient 来获取元数据，因为它能解析出正确的 page_count
+            try:
+                # 使用 'html' 实现来创建客户端
+                client = opt.new_jm_client(impl='html')
+                logger.debug(f"使用 JmHtmlClient 获取专辑 {jm_album_id} 的元数据")
+            except Exception as html_e:
+                logger.error(f"创建 JmHtmlClient 失败 ({html_e})，无法获取元数据。")
+                # 如果创建 HTML 客户端失败，则抛出运行时错误
+                raise RuntimeError(f"创建 JmHtmlClient 失败: {html_e}") from html_e
+
+            # 调用客户端的 get_album_detail 方法
+            # JmcomicClient 内部会处理重试和域名切换
+            album: JmAlbumDetail = client.get_album_detail(jm_album_id)
+
+            # JmHtmlClient 在找不到专辑时会抛出 JmcomicException 或其子类
+            # 无需显式检查 album is None
+
+            # 返回页数和标题 (JmHtmlClient 解析的 page_count 是正确的)
+            logger.info(f"成功获取专辑 {jm_album_id} 的元数据: {album.page_count} 页, 标题 '{album.name}'")
+            # JmAlbumDetail 的 page_count 属性是字符串，需要转为整数
+            page_count_int = int(album.page_count) if album.page_count.isdigit() else 0
+            return page_count_int, album.name
+
+        except JmcomicException as e: # 捕获 jmcomic 库特定的异常
+            logger.warning(f"使用 JmHtmlClient 获取专辑 {jm_album_id} 元数据时出错: {e}")
+            # 重新抛出，让上层处理具体的 HTTP 状态码
+            raise e
+        except Exception as e: # 捕获其他可能的错误 (如创建客户端实例时的错误)
+            # 捕获其他可能的错误 (如创建客户端实例时的错误)
+            logger.exception(f"获取专辑 {jm_album_id} 元数据时发生意外错误: {e}")
+            raise e
+        finally:
+            # new_jm_client 创建的实例通常不需要手动关闭
+            pass
+
+    try:
+        # 在线程池中运行同步的客户端调用
+        page_count, title = await loop.run_in_executor(
+            thread_pool,
+            _get_metadata_sync
+        )
+        return page_count, title
+    except Exception as e:
+        # 将底层的异常 (包括 JmcomicException) 传递上去
+        raise e
+
 
 async def get_album_image_info_async(
     jm_album_id: str,

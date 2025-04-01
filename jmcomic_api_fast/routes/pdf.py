@@ -17,9 +17,12 @@ from fastapi.responses import JSONResponse, FileResponse
 
 # Import project components
 from ..services.album_service import (
-    get_album_image_info_async,
-    get_album_image_paths_in_range_async,
+    get_album_image_info_async, # 保留给 /shard 使用
+    get_album_image_paths_in_range_async, # 保留给 /shard 使用
+    get_album_metadata_async, # 导入新函数
 )
+# 导入 jmcomic 异常基类，用于更精确的捕获
+from jmcomic import JmcomicException
 from ..utils.pdf import _generate_pdf_data # Import the core PDF generation logic
 from ..core.settings import (
     settings,
@@ -63,10 +66,25 @@ async def get_pdf_info(
     opt = get_jm_option()
     shard_size = 100 # Hardcoded shard size
     try:
-        # Get total pages (image count) and album title
-        total_pages, _, title = await get_album_image_info_async(
-            jm_album_id, opt, ensure_downloaded=True
-        )
+        # Get total pages and album title using metadata function (no download)
+        try:
+            total_pages, title = await get_album_metadata_async(jm_album_id, opt)
+        except JmcomicException as jm_e: # 捕获 jmcomic 库特定的异常
+            # 检查是否是资源未找到的特定子类异常 (如果 jmcomic 库提供了的话)
+            # 这里假设 JmcomicException 基类包含了网络错误和找不到资源的情况
+            logger.warning(f"请求元数据时 jmcomic 库出错 (专辑: {jm_album_id}): {jm_e}")
+            # 可以根据 jm_e 的具体类型或消息判断是否是 404
+            # 为了简单起见，暂时都归为 500，或者可以尝试更智能的判断
+            if "not found" in str(jm_e).lower() or "missing" in str(jm_e).lower(): # 简单的字符串匹配判断
+                 raise HTTPException(status_code=404, detail=f"Album {jm_album_id} not found online or access error.")
+            else:
+                 # 502 Bad Gateway 表示上游服务（JMComic API）出错
+                 raise HTTPException(status_code=502, detail=f"Error communicating with upstream JMComic service: {jm_e}")
+        except Exception as e: # 捕获其他可能的错误 (如 asyncio 问题或创建客户端失败)
+            logger.exception(f"获取专辑 {jm_album_id} 的元数据时发生意外错误: {e}")
+            raise HTTPException(
+                status_code=500, detail="Internal server error retrieving album metadata."
+            )
 
         if total_pages == 0:
              logger.warning(f"专辑 {jm_album_id} 没有找到图片，无法提供分片信息。")
@@ -110,13 +128,14 @@ async def get_pdf_info(
                 },
             }
         )
-    except FileNotFoundError:
-        logger.warning(f"请求信息时未找到专辑 {jm_album_id}")
-        raise HTTPException(status_code=404, detail=f"Album {jm_album_id} not found.")
+    except HTTPException as http_exc:
+        # Re-raise HTTPExceptions raised from metadata fetching
+        raise http_exc
     except Exception as e:
-        logger.exception(f"获取专辑 {jm_album_id} 的 PDF 信息时出错: {e}")
+        # Catch any other unexpected errors during shard calculation or processing
+        logger.exception(f"处理专辑 {jm_album_id} 的 PDF 信息时发生意外错误: {e}")
         raise HTTPException(
-            status_code=500, detail="Server error retrieving PDF shard info."
+            status_code=500, detail="Server error processing PDF shard info."
         )
 
 

@@ -12,18 +12,15 @@ download:
 dir_rule:
   base_dir: ./webp
   rule: Bd_Ajmbook
+  
+client:
+  domain:
+    html:
+      - 18comic.vip
+      - 18comic.org
+  retry_times: 10
 
-# plugins:
-#   after_album:
-#     # 合并整个本子
-#     # 使用前需要安装依赖库: [pip install img2pdf]
-#     - plugin: img2pdf
-#       kwargs:
-#         pdf_dir: ./pdf
-#         filename_rule: Aname  # pdf命名规则，A代表album, name代表使用album.name也就是本子名称
-# plugins:
-#  after_init:
-#    - plugin: login # 登录插件
-#      kwargs:
-#        username: ** # 用户名
-#        password: ** # 密码
+  postman:
+    meta_data:
+      cookies:
+        AVS: pjt3la3rh9jmu5njptia13g3ii 
