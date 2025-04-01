@@ -12,7 +12,7 @@ download:
 dir_rule:
   base_dir: ./webp
   rule: Bd_Ajmbook
-  
+
 client:
   domain:
     html:
@@ -23,4 +23,4 @@ client:
   postman:
     meta_data:
       cookies:
-        AVS: pjt3la3rh9jmu5njptia13g3ii 
+        AVS: ${{ secrets.JMCOMIC_COOKIE }}

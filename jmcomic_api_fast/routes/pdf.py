@@ -141,8 +141,33 @@ async def get_pdf_info(
 
 @router.get(
     "/shard/{jm_album_id}/{shard_index}",
-    summary="Get a specific PDF shard for an album as Base64", # Updated summary
-    response_description="JSON object containing the Base64 encoded PDF shard", # Updated description
+    summary="Get a specific PDF shard for an album (Base64 JSON or raw PDF)", # Updated summary
+    response_description="JSON object with Base64 PDF shard, or the raw PDF file if ?pdf=true", # Updated description
+    responses={ # Add responses for different content types
+        200: {
+            "description": "Successful response",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "success": {"type": "boolean"},
+                            "message": {"type": "string"},
+                            "shard_index": {"type": "integer"},
+                            "data": {"type": "string", "format": "byte"}, # Base64
+                        }
+                    }
+                },
+                "application/pdf": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            }
+        },
+        404: {"description": "Album or Shard not found"},
+        500: {"description": "Server error"},
+        502: {"description": "Upstream JMComic service error"},
+    }
 )
 async def get_pdf_shard(
     jm_album_id: str = FastApiPath(
@@ -151,11 +176,15 @@ async def get_pdf_shard(
     shard_index: int = FastApiPath(
         ..., gt=0, title="Shard Index", description="The 1-based index of the shard to retrieve"
     ),
+    pdf: bool = Query(False, description="If true, return the raw PDF file instead of Base64 JSON."), # <-- Add pdf query parameter
     # shard_size parameter removed, fixed to 100
 ):
     """
     Retrieves a specific shard (a PDF file containing a range of pages, fixed at 100 pages per shard)
-    for the given album ID. Uses cached shard if available, otherwise generates it on demand.
+    for the given album ID.
+    Returns a JSON with Base64 encoded data by default.
+    If `?pdf=true` is passed, returns the raw PDF file directly.
+    Uses cached shard if available, otherwise generates it on demand.
     """
     opt = get_jm_option()
     shard_size = 100 # Hardcoded shard size
@@ -173,22 +202,27 @@ async def get_pdf_shard(
             _, _, title = await get_album_image_info_async(
                 jm_album_id, opt, ensure_downloaded=False # Don't force download if only getting title
             )
-            with open(cache_path, "rb") as f:
-                pdf_content = f.read()
-            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
-            logger.info(f"成功读取并编码缓存的分片 {shard_index} (专辑 {jm_album_id})")
-            # Return JSON with base64 data
-            return JSONResponse(
-                content={
-                    "title": title, # Changed key from name to title
-                    "success": True,
-                    "message": "PDF shard found in cache and encoded.",
-                    "shard_index": shard_index, # Add shard index
-                    "data": pdf_base64, # Base64 data
-                }
-            )
+            # Check if raw PDF is requested
+            if pdf:
+                logger.info(f"缓存命中: 直接返回 PDF 文件 {cache_path}")
+                return FileResponse(cache_path, media_type='application/pdf', filename=cache_filename)
+            else:
+                # Return Base64 JSON as before
+                with open(cache_path, "rb") as f:
+                    pdf_content = f.read()
+                pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
+                logger.info(f"缓存命中: 返回 Base64 编码的 JSON (分片 {shard_index}, 专辑 {jm_album_id})")
+                return JSONResponse(
+                    content={
+                        "title": title,
+                        "success": True,
+                        "message": "PDF shard found in cache and encoded.",
+                        "shard_index": shard_index,
+                        "data": pdf_base64,
+                    }
+                )
         except FileNotFoundError:
-             logger.warning(f"缓存命中但获取标题时未找到专辑 {jm_album_id}，继续生成流程。")
+             logger.warning(f"缓存命中但获取标题时未找到专辑 {jm_album_id}，继续生成流程。") # Should ideally not happen if cache exists, but handle defensively
              # Proceed to cache miss logic if title fetch fails unexpectedly
         except Exception as e:
             logger.exception(f"读取或编码缓存文件 {cache_path} 时出错: {e}")
@@ -249,20 +283,24 @@ async def get_pdf_shard(
             # For now, raise 500 as the cache save failed.
             raise HTTPException(status_code=500, detail="Failed to save generated PDF shard.")
 
-        # Encode the generated data to Base64
-        pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
-        logger.info(f"成功生成并编码分片 {shard_index} (专辑 {jm_album_id})")
-
-        # Return JSON with base64 data
-        return JSONResponse(
-            content={
-                "title": title, # Changed key from name to title
-                "success": True,
-                "message": "PDF shard generated and encoded successfully.",
-                "shard_index": shard_index, # Add shard index
-                "data": pdf_base64, # Base64 data
-            }
-        )
+        # Decide response format based on 'pdf' query parameter
+        if pdf:
+            logger.info(f"分片已生成: 直接返回 PDF 文件 {cache_path}")
+            # Return the newly created file directly
+            return FileResponse(cache_path, media_type='application/pdf', filename=cache_filename)
+        else:
+            # Encode the generated data to Base64 and return JSON
+            pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
+            logger.info(f"分片已生成: 返回 Base64 编码的 JSON (分片 {shard_index}, 专辑 {jm_album_id})")
+            return JSONResponse(
+                content={
+                    "title": title,
+                    "success": True,
+                    "message": "PDF shard generated and encoded successfully.",
+                    "shard_index": shard_index,
+                    "data": pdf_base64,
+                }
+            )
 
     except FileNotFoundError as e:
         logger.warning(f"请求分片时未找到专辑 {jm_album_id} 或其图片: {e}")
