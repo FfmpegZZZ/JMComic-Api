@@ -1,6 +1,10 @@
 # JMComic API
 
-本仓库基于 [LingLambda/JMComic-Api](https://github.com/LingLambda/JMComic-Api) 修改，提供一个用于与禁漫天堂（JMComic）交互的 Web API 服务。
+本仓库使用 JMComic-Crawler-Python 提供一个用于与禁漫天堂（JMComic）交互的 Web API 服务。
+
+## 注意
+
+**develop** 分支使用了 Jmcomic 网页端 ，IP风控相对较严。如果获取不到请使用 **master** 分支。
 
 ## 使用方法
 
