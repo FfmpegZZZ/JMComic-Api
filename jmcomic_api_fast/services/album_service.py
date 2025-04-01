@@ -296,8 +296,15 @@ async def get_album_metadata_async(jm_album_id: str, opt: JmOption) -> Tuple[int
 
             # 返回页数和标题 (JmHtmlClient 解析的 page_count 是正确的)
             logger.info(f"成功获取专辑 {jm_album_id} 的元数据: {album.page_count} 页, 标题 '{album.name}'")
-            # JmAlbumDetail 的 page_count 属性是字符串，需要转为整数
-            page_count_int = int(album.page_count) if album.page_count.isdigit() else 0
+            # JmAlbumDetail 的 page_count 属性可能是字符串或整数，需要处理
+            if isinstance(album.page_count, int):
+                page_count_int = album.page_count
+            elif isinstance(album.page_count, str) and album.page_count.isdigit():
+                page_count_int = int(album.page_count)
+            else:
+                # 如果 page_count 不是数字字符串或整数，记录警告并设为 0
+                logger.warning(f"专辑 {jm_album_id} 的 page_count ('{album.page_count}') 不是有效的数字，将使用 0。")
+                page_count_int = 0
             return page_count_int, album.name
 
         except JmcomicException as e: # 捕获 jmcomic 库特定的异常
