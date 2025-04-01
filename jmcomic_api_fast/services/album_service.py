@@ -460,9 +460,6 @@ async def get_album_image_paths_in_range_async(
         file_path = image_folder_path / filename
         if file_path.exists():
             image_paths.append(file_path)
-        file_path = image_folder_path / filename
-        if file_path.exists():
-            image_paths.append(file_path)
         else:
             logger.warning(f"预期的图片文件未找到: {file_path}")
             missing_files.append(filename)
