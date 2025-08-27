@@ -2,6 +2,39 @@
 
 本仓库基于 [LingLambda/JMComic-Api](https://github.com/LingLambda/JMComic-Api) 修改，提供一个用于与禁漫天堂（JMComic）交互的 Web API 服务。
 
+## 重构说明 (2025)
+
+代码已分层重构，目录结构调整：
+
+```
+app/
+    api/        # 蓝图与路由（原 main.py 中的 API 部分）
+    services/   # 业务逻辑（如相册 PDF 生成）
+    utils/      # 工具函数（文件 / PDF 处理）
+    core/       # 配置等核心组件
+    factory.py  # Flask 应用工厂 + 配置热重载
+main.py        # 仅作为入口，调用 factory
+album_service.py # 兼容旧引用，转发到新实现
+```
+
+旧的 `album_service.get_album_pdf_path` 仍然可用（做了兼容封装），外部脚本无需立即修改导入路径。
+
+新增 `/health` 健康检查接口，可用于容器或反向代理探活。
+
+如需在外部创建应用实例，可：
+
+```python
+from app.factory import create_app
+app = create_app()
+```
+
+后续可考虑：
+1. 引入 pydantic/settings 管理配置
+2. 添加单元测试（pytest）
+3. 提供 OpenAPI / Swagger 文档（flask-smorest 或 fastapi 迁移）
+4. 增加统一错误处理中间件
+
+
 ## 注意
 
 本项目主要使用 jmcomic 移动端API。对IP要求相对较低。但是由于实现原因，**性能开销**会比较大。
