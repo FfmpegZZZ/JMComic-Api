@@ -25,6 +25,7 @@ from jmcomic.jm_exception import (
 )
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from jmcomic_api.concurrency.keyed_lock import LockTimeout
 from jmcomic_api.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -98,3 +99,22 @@ def register_handlers(app: FastAPI) -> None:
     async def _missing_file(_request: Request, exc: FileNotFoundError):
         logger.error("local_file_missing", error=str(exc))
         return _envelope("Required local file missing", 500)
+
+    @app.exception_handler(TimeoutError)
+    async def _timeout(_request: Request, exc: TimeoutError):
+        # asyncio.TimeoutError IS TimeoutError on 3.12+. Covers wait_for budget
+        # exhaustion in jm_client + album service.
+        logger.warning("request_timeout", error=str(exc))
+        resp = _envelope("Operation timed out — try again later", 504)
+        resp.headers["Retry-After"] = "30"
+        return resp
+
+    @app.exception_handler(LockTimeout)
+    async def _lock_timeout(_request: Request, exc: LockTimeout):
+        # Same album was being processed by another in-flight request and we
+        # waited too long. 503 + Retry-After signals "try again, the system
+        # isn't broken — it's busy".
+        logger.warning("lock_timeout", error=str(exc))
+        resp = _envelope("Resource busy — try again later", 503)
+        resp.headers["Retry-After"] = "30"
+        return resp
