@@ -20,23 +20,26 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Pin Python ${{ matrix.python-version }}
+        run: uv python pin ${{ matrix.python-version }}
 
       - name: Install deps
-        run: uv pip install --system -e ".[dev]"
+        run: uv sync --extra dev --frozen
 
       - name: Lint (ruff)
         run: |
-          ruff check .
-          ruff format --check .
+          uv run ruff check .
+          uv run ruff format --check .
 
       - name: Type-check (mypy)
-        run: mypy src
+        run: uv run mypy src
 
       - name: Tests (excluding e2e)
-        run: pytest tests/ -m "not e2e"
+        run: uv run pytest tests/ -m "not e2e"
 
       - name: E2E PDF tests
-        run: pytest tests/ -m e2e
+        run: uv run pytest tests/ -m e2e
