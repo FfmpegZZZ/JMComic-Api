@@ -7,7 +7,10 @@ The lifespan:
 4. registers a SIGHUP handler that reloads ``option.yml`` and rebuilds the client
    (replaces the watchdog observer — SIGHUP is reliable, watchdog double-fired
     on editor atomic writes)
-5. on shutdown, removes the SIGHUP handler
+5. on shutdown:
+   - cancels every tracked in-flight task (so SIGTERM doesn't get downgraded
+     to SIGKILL by the supervisor while a download is mid-flight)
+   - removes the SIGHUP handler
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
-from jmcomic_api import __version__
+from jmcomic_api import __version__, metrics
 from jmcomic_api.concurrency.keyed_lock import KeyedAsyncLock
 from jmcomic_api.deps import settings
 from jmcomic_api.errors import register_handlers
@@ -58,6 +61,12 @@ def create_app() -> FastAPI:
         # keeps tests deterministic — each test process gets its own.
         app.state.download_semaphore = asyncio.Semaphore(cfg.max_concurrent_downloads)
         app.state.album_lock = KeyedAsyncLock()
+        app.state.last_download_unix = None  # surfaced by /health/ready
+        app.state.tasks: set[asyncio.Task] = set()  # tracked for graceful shutdown
+
+        def _mark_download_success() -> None:
+            app.state.last_download_unix = time.time()
+
         app.state.album_service = AlbumService(
             lambda: app.state.runtime,
             lock=app.state.album_lock,
@@ -69,6 +78,7 @@ def create_app() -> FastAPI:
                 download_retry_initial_wait=cfg.download_retry_initial_wait,
                 download_retry_max_wait=cfg.download_retry_max_wait,
             ),
+            on_download_success=_mark_download_success,
         )
         logger.info(
             "startup_complete",
@@ -98,9 +108,24 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            # Graceful shutdown: cancel every tracked task and wait up to
+            # ``shutdown_grace_seconds`` for them to finish. Any survivors get
+            # forcibly killed by uvicorn / the supervisor afterward.
+            tasks = [t for t in getattr(app.state, "tasks", set()) if not t.done()]
+            if tasks:
+                logger.info("lifespan_shutdown_cancelling", tasks=len(tasks))
+                for t in tasks:
+                    t.cancel()
+                done, pending = await asyncio.wait(tasks, timeout=cfg.shutdown_grace_seconds)
+                logger.info(
+                    "lifespan_shutdown_drained",
+                    completed=len(done),
+                    still_running=len(pending),
+                )
             if signal_installed:
                 with contextlib.suppress(NotImplementedError, ValueError):
                     loop.remove_signal_handler(signal.SIGHUP)
+            logger.info("lifespan_shutdown_complete")
 
     app = FastAPI(
         title="JMComic API",
@@ -137,6 +162,10 @@ def create_app() -> FastAPI:
                 status_code=response.status_code,
             )
         return response
+
+    # Metrics middleware must wrap routes to observe their final status.
+    app.middleware("http")(metrics.http_middleware)
+    metrics.mount(app)
 
     register_handlers(app)
     app.include_router(health_router.router)
