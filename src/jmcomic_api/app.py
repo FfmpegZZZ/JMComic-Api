@@ -62,7 +62,8 @@ def create_app() -> FastAPI:
         app.state.download_semaphore = asyncio.Semaphore(cfg.max_concurrent_downloads)
         app.state.album_lock = KeyedAsyncLock()
         app.state.last_download_unix = None  # surfaced by /health/ready
-        app.state.tasks: set[asyncio.Task] = set()  # tracked for graceful shutdown
+        # Tracked tasks for graceful shutdown.
+        app.state.tasks = set()
 
         def _mark_download_success() -> None:
             app.state.last_download_unix = time.time()

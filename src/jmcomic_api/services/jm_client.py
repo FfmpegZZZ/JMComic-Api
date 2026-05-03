@@ -171,7 +171,9 @@ async def download_with_retry(
         # tenacity wraps the underlying when reraise=False; with reraise=True we
         # shouldn't get here — but be defensive.
         if e.last_attempt and e.last_attempt.failed:
-            raise e.last_attempt.exception() from e
+            inner = e.last_attempt.exception()
+            if inner is not None:
+                raise inner from e
         raise
 
 
