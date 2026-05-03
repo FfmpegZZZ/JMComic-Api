@@ -6,6 +6,10 @@ long-running processes.
 
 Replaces the threading-based ``KeyedTaskQueue`` from the Flask era. Same key →
 serial; different keys → parallel.
+
+Reliability:
+- ``acquire(key, timeout=...)`` will raise :class:`LockTimeout` instead of
+  waiting forever if the holder is stuck.
 """
 
 from __future__ import annotations
@@ -15,6 +19,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 
+class LockTimeout(Exception):
+    """Raised when ``KeyedAsyncLock.acquire`` cannot get the lock in time."""
+
+
 class KeyedAsyncLock:
     def __init__(self) -> None:
         self._locks: dict[str, asyncio.Lock] = {}
@@ -22,7 +30,7 @@ class KeyedAsyncLock:
         self._meta = asyncio.Lock()
 
     @asynccontextmanager
-    async def acquire(self, key: str) -> AsyncIterator[None]:
+    async def acquire(self, key: str, *, timeout: float | None = None) -> AsyncIterator[None]:
         async with self._meta:
             lock = self._locks.get(key)
             if lock is None:
@@ -30,10 +38,20 @@ class KeyedAsyncLock:
                 self._locks[key] = lock
             self._refs[key] = self._refs.get(key, 0) + 1
 
+        acquired = False
         try:
-            async with lock:
-                yield
+            if timeout is None:
+                await lock.acquire()
+            else:
+                try:
+                    await asyncio.wait_for(lock.acquire(), timeout=timeout)
+                except TimeoutError as e:
+                    raise LockTimeout(f"could not acquire lock {key!r} within {timeout}s") from e
+            acquired = True
+            yield
         finally:
+            if acquired:
+                lock.release()
             async with self._meta:
                 self._refs[key] -= 1
                 if self._refs[key] == 0:

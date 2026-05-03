@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
 from jmcomic_api import __version__
+from jmcomic_api.concurrency.keyed_lock import KeyedAsyncLock
 from jmcomic_api.deps import settings
 from jmcomic_api.errors import register_handlers
 from jmcomic_api.logging_config import configure as configure_logging
@@ -32,7 +33,7 @@ from jmcomic_api.logging_config import get_logger
 from jmcomic_api.routers import catalog as catalog_router
 from jmcomic_api.routers import health as health_router
 from jmcomic_api.routers import pdf as pdf_router
-from jmcomic_api.services.album import AlbumService
+from jmcomic_api.services.album import AlbumService, ReliabilityConfig
 from jmcomic_api.services.jm_client import (
     install_album_dirname_advice,
     load_runtime,
@@ -51,7 +52,24 @@ def create_app() -> FastAPI:
         cfg.shard_cache_path.mkdir(parents=True, exist_ok=True)
         app.state.settings = cfg
         app.state.runtime = load_runtime(cfg.option_file)
-        app.state.album_service = AlbumService(lambda: app.state.runtime)
+
+        # Reliability stack: global download semaphore + keyed lock + tunable
+        # retry/timeout config. Constructing them here (not at import time)
+        # keeps tests deterministic — each test process gets its own.
+        app.state.download_semaphore = asyncio.Semaphore(cfg.max_concurrent_downloads)
+        app.state.album_lock = KeyedAsyncLock()
+        app.state.album_service = AlbumService(
+            lambda: app.state.runtime,
+            lock=app.state.album_lock,
+            download_semaphore=app.state.download_semaphore,
+            reliability=ReliabilityConfig(
+                download_timeout_seconds=cfg.download_timeout_seconds,
+                pdf_build_timeout_seconds=cfg.pdf_build_timeout_seconds,
+                download_retry_attempts=cfg.download_retry_attempts,
+                download_retry_initial_wait=cfg.download_retry_initial_wait,
+                download_retry_max_wait=cfg.download_retry_max_wait,
+            ),
+        )
         logger.info(
             "startup_complete",
             version=__version__,
