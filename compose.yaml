@@ -1,0 +1,15 @@
+services:
+  jmcomic-api:
+    build: .
+    image: jmcomic-api:local
+    container_name: jmcomic-api
+    ports:
+      - "8699:8699"
+    volumes:
+      - ./pdf:/app/pdf
+      - ./webp:/app/webp
+      - ./option.yml:/app/option.yml:ro
+    environment:
+      JMAPI_LOG_FORMAT: console
+      JMAPI_LOG_LEVEL: INFO
+    restart: unless-stopped
