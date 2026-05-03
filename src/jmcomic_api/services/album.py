@@ -18,11 +18,13 @@ import asyncio
 import contextlib
 import math
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from jmcomic.jm_exception import PartialDownloadFailedException
 
+from jmcomic_api import metrics
 from jmcomic_api.concurrency.keyed_lock import KeyedAsyncLock
 from jmcomic_api.logging_config import get_logger
 from jmcomic_api.services import jm_client
@@ -83,6 +85,7 @@ class AlbumService:
         lock: KeyedAsyncLock | None = None,
         download_semaphore: asyncio.Semaphore | None = None,
         reliability: ReliabilityConfig | None = None,
+        on_download_success=None,
     ) -> None:
         # ``runtime_provider`` is a callable returning the current ``JmRuntime``
         # so we always pick up the latest opt/client after a SIGHUP reload.
@@ -92,6 +95,9 @@ class AlbumService:
         # real app constructs the service with the configured cap.
         self._sem = download_semaphore or asyncio.Semaphore(1)
         self._cfg = reliability or ReliabilityConfig()
+        # Optional sink for "we just finished a real download" — used by
+        # ``/health/ready`` to surface ``last_download_age_seconds``.
+        self._on_download_success = on_download_success
 
     @property
     def lock(self) -> KeyedAsyncLock:
@@ -129,11 +135,16 @@ class AlbumService:
                         path=str(pdf_path),
                         pages=expected_pages,
                     )
+                    metrics.record_cache("pdf", hit=True)
                     return PdfArtifact(path=pdf_path, filename=filename)
                 logger.info("pdf_cache_mismatch_rebuild", album=album_id, path=str(pdf_path))
+                metrics.record_cache("pdf", hit=False)
                 with contextlib.suppress(OSError):
                     os.remove(pdf_path)
+            else:
+                metrics.record_cache("pdf", hit=False)
 
+            t0 = time.monotonic()
             await asyncio.wait_for(
                 asyncio.to_thread(
                     merge_webp_to_pdf,
@@ -143,6 +154,7 @@ class AlbumService:
                 ),
                 timeout=self._cfg.pdf_build_timeout_seconds,
             )
+            metrics.record_pdf_build_duration("full", time.monotonic() - t0)
             return PdfArtifact(path=pdf_path, filename=filename)
 
     # ---- shard support -----------------------------------------------------
@@ -210,6 +222,7 @@ class AlbumService:
                     pages=expected_shard_pages,
                     path=str(out_path),
                 )
+                metrics.record_cache("shard", hit=True)
                 return (
                     PdfArtifact(path=out_path, filename=filename),
                     total,
@@ -218,10 +231,12 @@ class AlbumService:
                     meta.title,
                 )
 
+            metrics.record_cache("shard", hit=False)
             if out_path.exists():
                 with contextlib.suppress(OSError):
                     os.remove(out_path)
 
+            t0 = time.monotonic()
             await asyncio.wait_for(
                 asyncio.to_thread(
                     merge_image_paths_to_pdf,
@@ -231,6 +246,7 @@ class AlbumService:
                 ),
                 timeout=self._cfg.pdf_build_timeout_seconds,
             )
+            metrics.record_pdf_build_duration("shard", time.monotonic() - t0)
             return (
                 PdfArtifact(path=out_path, filename=filename),
                 total,
@@ -260,6 +276,7 @@ class AlbumService:
             folder = webp_folder(runtime.opt.dir_rule.base_dir, album_id, existing_title)
             if (folder / DONE_MARKER).exists():
                 logger.info("album_cache_hit", album=album_id, title=existing_title)
+                metrics.record_cache("album", hit=True)
                 return existing_title
             logger.info(
                 "album_partial_cache_resuming",
@@ -267,24 +284,34 @@ class AlbumService:
                 title=existing_title,
                 folder=str(folder),
             )
+            metrics.record_cache("album", hit=False)
+        else:
+            metrics.record_cache("album", hit=False)
 
         logger.info("album_downloading", album=album_id)
-        async with self._sem:  # global concurrency cap
-            album, _ = await jm_client.download_with_retry(
-                album_id,
-                runtime.opt,
-                timeout=self._cfg.download_timeout_seconds,
-                max_attempts=self._cfg.download_retry_attempts,
-                initial_wait=self._cfg.download_retry_initial_wait,
-                max_wait=self._cfg.download_retry_max_wait,
-            )
+        try:
+            async with self._sem:  # global concurrency cap
+                album, _ = await jm_client.download_with_retry(
+                    album_id,
+                    runtime.opt,
+                    timeout=self._cfg.download_timeout_seconds,
+                    max_attempts=self._cfg.download_retry_attempts,
+                    initial_wait=self._cfg.download_retry_initial_wait,
+                    max_wait=self._cfg.download_retry_max_wait,
+                )
+        except TimeoutError:
+            metrics.record_download_outcome("timeout")
+            raise
+        except PartialDownloadFailedException:
+            metrics.record_download_outcome("retry_exhausted")
+            raise
 
         title = album.name
         folder = webp_folder(runtime.opt.dir_rule.base_dir, album_id, title)
         actual_pages = len(list_album_image_paths(folder))
         expected_pages = getattr(album, "page_count", None) or actual_pages
         if actual_pages == 0 or actual_pages < expected_pages:
-            # Don't write .done — callers retry / surface 503.
+            metrics.record_download_outcome("partial_fail")
             logger.warning(
                 "album_incomplete_after_download",
                 album=album_id,
@@ -296,6 +323,10 @@ class AlbumService:
                 {"expected": expected_pages, "actual": actual_pages},
             )
 
+        metrics.record_download_outcome("success")
+        if self._on_download_success is not None:
+            with contextlib.suppress(Exception):
+                self._on_download_success()
         try:
             (folder / DONE_MARKER).touch()
             logger.info(

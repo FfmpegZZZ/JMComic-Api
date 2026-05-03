@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     # Max time to wait for a per-album lock before giving up with 503.
     lock_acquire_timeout_seconds: float = Field(default=600, ge=1)
 
+    # /health/ready disk-space gate. Below this, the readiness probe goes 503
+    # so a load balancer sheds traffic before downloads start failing.
+    min_free_disk_mb: int = Field(default=500, ge=0)
+
+    # Graceful shutdown: lifespan cancels in-flight tasks then waits up to N
+    # seconds before yielding control to uvicorn for the final teardown.
+    shutdown_grace_seconds: float = Field(default=30, ge=0)
+
     @property
     def option_path(self) -> Path:
         return self.option_file.resolve()
