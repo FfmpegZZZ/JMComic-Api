@@ -1,30 +1,29 @@
 # syntax=docker/dockerfile:1.7
 # The previous Dockerfile `git clone`d an unrelated upstream
 # (FfmpegZZZ/JMComic-Api), so the published image's code never matched this
-# repository. Now: COPY local src + pyproject.
+# repository. Now: COPY local src + lockfile.
 
 FROM python:3.12-slim AS builder
 
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
-    UV_PYTHON_DOWNLOADS=never
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# Install runtime deps first so they're cached separately from source changes.
-COPY pyproject.toml ./
+# Install deps from lockfile first (cached on lockfile change).
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
+
+# Copy source then install the package itself.
 COPY src/ src/
 COPY README.md ./
-
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv venv /app/.venv && \
-    uv pip install --python /app/.venv/bin/python --no-deps -e . && \
-    uv pip install --python /app/.venv/bin/python \
-        "fastapi>=0.115" "uvicorn[standard]>=0.30" "jmcomic==2.6.18" \
-        "pypdf>=5" "Pillow>=11.1.0" "pydantic>=2.7" "pydantic-settings>=2.4" \
-        "PyYAML>=6.0" "structlog>=24.4"
+    uv sync --frozen --no-dev
 
 
 FROM python:3.12-slim AS runtime
@@ -42,8 +41,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     JMAPI_OPTION_FILE=/app/option.yml \
     JMAPI_LOG_FORMAT=json
 
-RUN mkdir -p /app/pdf /app/webp
-VOLUME ["/app/pdf", "/app/webp"]
+RUN mkdir -p /app/pdf /app/webp /app/pdf_cache
+VOLUME ["/app/pdf", "/app/webp", "/app/pdf_cache"]
 
 EXPOSE 8699
 

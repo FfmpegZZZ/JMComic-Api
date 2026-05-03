@@ -156,7 +156,7 @@ async def pdf_shard(
         raise HTTPException(status_code=422, detail="shard_index must be >= 1")
 
     try:
-        artifact, total, start, end = await album_service.build_shard(
+        artifact, total, start, end, title = await album_service.build_shard(
             album_id,
             shard_index=shard_index,
             shard_size=settings_dep.pdf_shard_size,
@@ -176,14 +176,10 @@ async def pdf_shard(
         )
 
     encoded = base64.b64encode(artifact.path.read_bytes()).decode("utf-8")
-    # Title is recovered from the artifact filename's parent (album subdir is
-    # the clean id) — simpler to just call metadata once more, but the data is
-    # already sitting in the album_service; expose via a minimal extra call.
-    meta = await album_service.metadata(album_id)
     return {
         "success": True,
         "message": "PDF shard generated successfully",
-        "title": meta.title,
+        "title": title,
         "shard_index": shard_index,
         "total_pages": total,
         "start_page": start,

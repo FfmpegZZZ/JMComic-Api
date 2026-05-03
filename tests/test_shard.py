@@ -185,8 +185,11 @@ def test_shard_pdf_is_decryptable(tmp_path):
     cache = tmp_path / "shards"
     cache.mkdir()
 
-    art, total, start, end = asyncio.run(svc.build_shard("JM555", 1, 5, cache, enable_pwd=True))
+    art, total, start, end, title = asyncio.run(
+        svc.build_shard("JM555", 1, 5, cache, enable_pwd=True)
+    )
     assert (total, start, end) == (8, 1, 5)
+    assert title == "Test Album"
 
     reader = PdfReader(str(art.path))
     assert reader.is_encrypted

@@ -35,14 +35,17 @@ def find_existing_album_title(base_dir: str | Path, album_id: str) -> str | None
     """Return the album title if the webp folder exists, else None.
 
     Folder convention: ``[<id>]<title>``. ``album_id`` should already be the
-    clean (no ``JM``) form.
+    clean (no ``JM``) form. If multiple folders match (e.g. manual copies),
+    the lexicographically smallest name wins — deterministic across platforms,
+    unlike ``Path.iterdir()``.
     """
     root = Path(base_dir)
     if not root.exists():
         return None
     pattern = re.compile(rf"\[{re.escape(album_id)}\]")
-    for item in root.iterdir():
-        if item.is_dir() and pattern.match(item.name):
-            idx = item.name.find("]")
-            return item.name[idx + 1 :].strip() if idx != -1 else None
-    return None
+    matches = sorted(item for item in root.iterdir() if item.is_dir() and pattern.match(item.name))
+    if not matches:
+        return None
+    name = matches[0].name
+    idx = name.find("]")
+    return name[idx + 1 :].strip() if idx != -1 else None

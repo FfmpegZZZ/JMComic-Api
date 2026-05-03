@@ -50,7 +50,9 @@ async def search(client: JmApiClient, query: str, page: int) -> JmSearchPage:
     return await asyncio.to_thread(client.search_site, search_query=query, page=page)
 
 
-async def get_album_detail(client: JmApiClient, album_id: str) -> JmAlbumDetail:
+async def get_album_detail(client: JmApiClient, album_id: str) -> JmAlbumDetail | None:
+    """May return ``None`` if the upstream lookup yields no album (callers in
+    ``routers/catalog.py`` handle the ``None`` case explicitly)."""
     return await asyncio.to_thread(client.get_album_detail, album_id)
 
 

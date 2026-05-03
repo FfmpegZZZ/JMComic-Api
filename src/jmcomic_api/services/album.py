@@ -131,11 +131,13 @@ class AlbumService:
         cache_dir: Path,
         *,
         enable_pwd: bool,
-    ) -> tuple[PdfArtifact, int, int, int]:
+    ) -> tuple[PdfArtifact, int, int, int, str]:
         """Build (or reuse) a shard PDF.
 
-        Returns ``(artifact, total_pages, start_page, end_page)``. ``shard_index``
-        is 1-based.
+        Returns ``(artifact, total_pages, start_page, end_page, title)``.
+        ``shard_index`` is 1-based. The title is included so callers don't
+        need a second ``metadata()`` round-trip (which would re-acquire the
+        per-album lock).
         """
         album_id = clean_album_id(raw_album_id)
         meta = await self.metadata(raw_album_id)
@@ -169,7 +171,13 @@ class AlbumService:
                     shard=shard_index,
                     path=str(out_path),
                 )
-                return PdfArtifact(path=out_path, filename=filename), total, start, end
+                return (
+                    PdfArtifact(path=out_path, filename=filename),
+                    total,
+                    start,
+                    end,
+                    meta.title,
+                )
 
             if out_path.exists():
                 # Encryption mismatch — rebuild.
@@ -182,7 +190,13 @@ class AlbumService:
                 str(out_path),
                 password=password,
             )
-            return PdfArtifact(path=out_path, filename=filename), total, start, end
+            return (
+                PdfArtifact(path=out_path, filename=filename),
+                total,
+                start,
+                end,
+                meta.title,
+            )
 
     # ---- internals ---------------------------------------------------------
 
