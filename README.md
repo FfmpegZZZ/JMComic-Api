@@ -2,79 +2,79 @@
 
 本仓库基于 [LingLambda/JMComic-Api](https://github.com/LingLambda/JMComic-Api) 修改，提供一个用于与禁漫天堂（JMComic）交互的 Web API 服务。
 
-## 重构说明 (2025)
+## 2026 重构 (v2.0)
 
-代码已分层重构，目录结构调整：
+整套底层重写，从 Flask + waitress + PyPDF2 迁移到 **FastAPI + uvicorn + pypdf**，并升级 jmcomic 到 `2.6.18`。
+
+新结构：
 
 ```
-app/
-    api/        # 蓝图与路由（原 main.py 中的 API 部分）
-    services/   # 业务逻辑（如相册 PDF 生成）
-    utils/      # 工具函数（文件 / PDF 处理）
-    core/       # 配置等核心组件
-    factory.py  # Flask 应用工厂 + 配置热重载
-main.py        # 仅作为入口，调用 factory
-album_service.py # 兼容旧引用，转发到新实现
+src/jmcomic_api/
+    app.py              # FastAPI 应用 + lifespan
+    settings.py         # pydantic-settings（环境变量驱动）
+    routers/            # pdf / catalog / health
+    services/           # jm_client adapter + album service + pdf builder
+    concurrency/        # asyncio.Lock keyed dict（替换原 KeyedTaskQueue）
+    schemas/            # 请求/响应模型
+tests/                  # pytest（含 e2e）
+Dockerfile              # 多阶段，COPY 本地源码（不再 git clone 上游）
+compose.yaml
 ```
 
-旧的 `album_service.get_album_pdf_path` 仍然可用（做了兼容封装），外部脚本无需立即修改导入路径。
+### Breaking changes vs 1.x
 
-新增 `/health` 健康检查接口，可用于容器或反向代理探活。
-
-如需在外部创建应用实例，可：
-
-```python
-from app.factory import create_app
-app = create_app()
-```
-
-后续可考虑：
-1. 引入 pydantic/settings 管理配置
-2. 添加单元测试（pytest）
-3. 提供 OpenAPI / Swagger 文档（flask-smorest 或 fastapi 迁移）
-4. 增加统一错误处理中间件
-
+| 项 | 旧 | 新 |
+|---|---|---|
+| 入口 | `python main.py` | `python -m jmcomic_api` 或 `uvicorn jmcomic_api.app:app` |
+| 配置文件 | 改 `app/core/config.py` 源码 | 环境变量 / `.env`（前缀 `JMAPI_`） |
+| `option.yml` 热重载 | watchdog 文件监听（双触发问题） | `kill -HUP <pid>` 信号触发 |
+| PDF 加密引擎 | PyPDF2 | pypdf 8（**旧缓存可能无法解密，建议清空 `pdf/` 一次**） |
+| `JM`-前缀 ID | 缓存被破坏（bug） | `JM12345` / `12345` 同一缓存 |
+| 错误响应 | 笼统 500 | 按 `JmcomicException` 子类映射 404 / 502 / 503 |
+| 文档 | `/docs` 跳转 apifox | FastAPI 自动 `/docs` Swagger UI |
+| 兼容 shim | `album_service.py` / `config.py` 在根目录 | 已删除，外部 import 需改为 `from jmcomic_api...` |
 
 ## 注意
 
-本项目主要使用 jmcomic 移动端API。对IP要求相对较低。但是由于实现原因，**性能开销**会比较大。
-
-### 更加推荐使用 [jmcomic-api:develop](https://github.com/FfmpegZZZ/JMComic-Api/tree/develop) 性能开销更低，但是使用了网页的API，IP风控会更加严格。
+本项目主要使用 jmcomic 移动端 API，对 IP 要求相对较低。
 
 ## 使用方法
 
-你可以选择直接运行源代码或使用 Docker 镜像。
+### 直接运行（推荐使用 [uv](https://docs.astral.sh/uv/)）
 
-### 直接运行
+```bash
+# 安装 uv（首次）
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-1.  **下载源码包并解压**，然后进入项目根目录。
-2.  **创建并激活 Python 虚拟环境**:
-    *   创建: `python -m venv .venv`
-    *   激活 (Windows): `.\.venv\Scripts\activate`
-    *   激活 (macOS/Linux): `source .venv/bin/activate`
-3.  **安装依赖**:
-    ```bash
-    pip install -r requirements.txt
-    ```
-4.  **(可选) 配置**: 编辑 `option.yml` 文件以配置 JMComic 客户端选项和 API 服务设置（如主机和端口）。默认服务运行在 `0.0.0.0:8699`。
-5.  **运行**:
-    ```bash
-    python main.py
-    ```
-    服务将在 `option.yml` 中配置的地址和端口启动。
+# 创建 venv 并装依赖
+uv venv --python 3.12
+uv pip install -e ".[dev]"
 
-### 使用 Docker (推荐)
+# （可选）复制 .env 配置
+cp .env.example .env
 
-我们提供了预构建的 Docker 镜像 `orwellz/jmcomic-api`
+# 启动
+uv run uvicorn jmcomic_api.app:app --host 0.0.0.0 --port 8699
+# 或：python -m jmcomic_api
+```
 
-1.  **拉取镜像**:
-    ```bash
-    docker pull orwellz/jmcomic-api:latest
-    ```
-2.  **运行容器**:
-    ```bash
-    # 运行在后台，将容器的 8699 端口映射到宿主机的 8699 端口
-    docker run -d --name jmcomic-api -p 8699:8699 orwellz/jmcomic-api:latest
+启动后访问 `http://localhost:8699/docs` 查看自动生成的 Swagger UI。
+
+### 使用 Docker
+
+```bash
+# 自构建（推荐，确保镜像内容跟仓库代码一致）
+docker compose up -d --build
+
+# 或拉取预构建（如果 CI 还在推 orwellz/jmcomic-api 这个 image）
+docker run -d --name jmcomic-api -p 8699:8699 orwellz/jmcomic-api:latest
+```
+
+热重载 jmcomic 配置（不重启容器）：
+
+```bash
+docker kill -s HUP jmcomic-api
+```
 
 ## API 接口文档
 

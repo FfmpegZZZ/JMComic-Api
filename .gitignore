@@ -1,4 +1,32 @@
+# Python
 __pycache__/
-utils/__pycache__/
+*.pyc
+*.pyo
+
+# Virtualenv / package manager
+.venv/
+.python-version
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Project artifacts
 pdf/
+pdf_cache/
 webp/
+.locks/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
