@@ -21,6 +21,49 @@ def _normalize_passwd(value: str) -> bool:
     return value.lower() not in ("false", "0")
 
 
+# Preset → JPEG quality. Picked so each tier is visibly distinct in size on a
+# typical comic album (see README): small ~ -55%, medium ~ -38%, large ~ -15%.
+_QUALITY_PRESETS: dict[str, int] = {
+    "small": 20,
+    "medium": 45,
+    "large": 70,
+    "小": 20,
+    "中": 45,
+    "大": 70,
+    "s": 20,
+    "m": 45,
+    "l": 70,
+}
+
+
+def _resolve_quality(value: str | None) -> int | None:
+    """Accept preset name (small/medium/large + CN aliases) or 1-95 int.
+
+    Returns ``None`` when the caller didn't pass anything — native Pillow
+    default (no extra recompression knob).
+    """
+    if value is None or value == "":
+        return None
+    key = value.strip().lower()
+    if key in _QUALITY_PRESETS:
+        return _QUALITY_PRESETS[key]
+    try:
+        n = int(key)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"quality '{value}' invalid; expected small/medium/large or an integer 1-95"
+            ),
+        ) from e
+    if not (1 <= n <= 95):
+        raise HTTPException(
+            status_code=422,
+            detail=f"quality {n} out of range; integer must be 1-95",
+        )
+    return n
+
+
 # Legacy URL: ``/get_pdf/<id>?passwd=&Titletype=&pdf=true``
 @router.get("/get_pdf/{album_id}")
 async def get_pdf_legacy(
@@ -30,12 +73,20 @@ async def get_pdf_legacy(
     passwd: str = Query("true"),
     Titletype: int = Query(2),
     pdf: str = Query("false"),
+    quality: str | None = Query(
+        None,
+        description=(
+            "Compression preset (small/medium/large or 小/中/大) "
+            "or raw JPEG quality 1-95. Omit for native (largest)."
+        ),
+    ),
 ):
     artifact = await album_service.get_or_build(
         album_id,
         settings_dep.pdf_path,
         enable_pwd=_normalize_passwd(passwd),
         title_type=Titletype,
+        jpeg_quality=_resolve_quality(quality),
     )
     if not artifact.path.exists():
         raise HTTPException(status_code=404, detail="PDF 文件不存在")
@@ -63,12 +114,20 @@ async def get_pdf_path_legacy(
     settings_dep=Depends(settings),
     passwd: str = Query("true"),
     Titletype: int = Query(2),
+    quality: str | None = Query(
+        None,
+        description=(
+            "Compression preset (small/medium/large or 小/中/大) "
+            "or raw JPEG quality 1-95. Omit for native (largest)."
+        ),
+    ),
 ):
     artifact = await album_service.get_or_build(
         album_id,
         settings_dep.pdf_path,
         enable_pwd=_normalize_passwd(passwd),
         title_type=Titletype,
+        jpeg_quality=_resolve_quality(quality),
     )
     return {
         "success": True,
@@ -150,6 +209,13 @@ async def pdf_shard(
     settings_dep=Depends(settings),
     pdf: bool = Query(False, description="If true, stream raw application/pdf instead of JSON."),
     passwd: str = Query("true"),
+    quality: str | None = Query(
+        None,
+        description=(
+            "Compression preset (small/medium/large or 小/中/大) "
+            "or raw JPEG quality 1-95. Omit for native (largest)."
+        ),
+    ),
 ):
     """Build (or reuse cache) the Nth shard PDF for an album."""
     if shard_index <= 0:
@@ -162,6 +228,7 @@ async def pdf_shard(
             shard_size=settings_dep.pdf_shard_size,
             cache_dir=settings_dep.shard_cache_path,
             enable_pwd=_normalize_passwd(passwd),
+            jpeg_quality=_resolve_quality(quality),
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e

@@ -113,13 +113,14 @@ class AlbumService:
         *,
         enable_pwd: bool,
         title_type: int,
+        jpeg_quality: int | None = None,
     ) -> PdfArtifact:
         album_id = clean_album_id(raw_album_id)
         runtime = self._runtime()
 
         async with self._lock.acquire(f"album:{album_id}"):
             title = await self._ensure_title(album_id, runtime)
-            filename = derive_pdf_filename(album_id, title, title_type)
+            filename = derive_pdf_filename(album_id, title, title_type, jpeg_quality=jpeg_quality)
             pdf_path = pdf_dir.resolve() / filename
             pdf_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -151,6 +152,7 @@ class AlbumService:
                     str(folder),
                     str(pdf_path),
                     password=password,
+                    jpeg_quality=jpeg_quality,
                 ),
                 timeout=self._cfg.pdf_build_timeout_seconds,
             )
@@ -182,6 +184,7 @@ class AlbumService:
         cache_dir: Path,
         *,
         enable_pwd: bool,
+        jpeg_quality: int | None = None,
     ) -> tuple[PdfArtifact, int, int, int, str]:
         """Build (or reuse) a shard PDF.
 
@@ -206,7 +209,8 @@ class AlbumService:
 
         album_cache = cache_dir / album_id
         album_cache.mkdir(parents=True, exist_ok=True)
-        filename = f"shard_{shard_index}_of_{num_shards}_size{shard_size}.pdf"
+        quality_tag = f".q{jpeg_quality}" if jpeg_quality is not None else ""
+        filename = f"shard_{shard_index}_of_{num_shards}_size{shard_size}{quality_tag}.pdf"
         out_path = album_cache / filename
 
         password = album_id if enable_pwd else None
@@ -243,6 +247,7 @@ class AlbumService:
                     slice_paths,
                     str(out_path),
                     password=password,
+                    jpeg_quality=jpeg_quality,
                 ),
                 timeout=self._cfg.pdf_build_timeout_seconds,
             )

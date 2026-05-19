@@ -17,14 +17,25 @@ def sanitize_filename(name: str) -> str:
     return _INVALID_NAME_CHARS.sub("", name).strip()
 
 
-def derive_pdf_filename(album_id: str, title: str, title_type: int) -> str:
-    """0 → ``<id>.pdf``; 1 → ``<title>.pdf``; 2/other → ``[<id>] <title>.pdf``."""
+def derive_pdf_filename(
+    album_id: str,
+    title: str,
+    title_type: int,
+    *,
+    jpeg_quality: int | None = None,
+) -> str:
+    """0 → ``<id>.pdf``; 1 → ``<title>.pdf``; 2/other → ``[<id>] <title>.pdf``.
+
+    When ``jpeg_quality`` is set, a ``.qN`` suffix is inserted before ``.pdf`` so
+    the lossy variant never overwrites the lossless cache (and vice versa).
+    """
     safe = sanitize_filename(title)
+    suffix = f".q{jpeg_quality}" if jpeg_quality is not None else ""
     if title_type == 0:
-        return f"{album_id}.pdf"
+        return f"{album_id}{suffix}.pdf"
     if title_type == 1:
-        return f"{safe}.pdf"
-    return f"[{album_id}] {safe}.pdf"
+        return f"{safe}{suffix}.pdf"
+    return f"[{album_id}] {safe}{suffix}.pdf"
 
 
 def webp_folder(base_dir: str | Path, album_id: str, title: str) -> Path:

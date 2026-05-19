@@ -1,6 +1,6 @@
 [project]
 name = "jmcomic-api"
-version = "2.0.0"
+version = "2.1.0"
 description = "FastAPI service wrapping the jmcomic library to download albums and serve them as PDFs."
 readme = "README.md"
 requires-python = ">=3.12"

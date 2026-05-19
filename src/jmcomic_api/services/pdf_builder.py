@@ -27,13 +27,22 @@ from jmcomic_api.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def _build_pdf_from_paths(paths: Iterable[Path], pdf_path: Path, password: str | None) -> int:
+def _build_pdf_from_paths(
+    paths: Iterable[Path],
+    pdf_path: Path,
+    password: str | None,
+    *,
+    jpeg_quality: int | None = None,
+) -> int:
     """Write a PDF atomically. Returns page count.
 
     Strategy:
     1. Write to ``<pdf_path>.tmp``.
     2. ``os.replace()`` to final location (POSIX atomic, also works on Windows).
     3. On any exception, remove the ``.tmp`` file so we don't leak partial output.
+
+    When ``jpeg_quality`` is supplied (1..95), each page is embedded as a
+    DCT-encoded JPEG at that quality — gives a much smaller PDF for sharing.
     """
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = pdf_path.with_suffix(pdf_path.suffix + ".tmp")
@@ -47,7 +56,11 @@ def _build_pdf_from_paths(paths: Iterable[Path], pdf_path: Path, password: str |
         for img_path in paths:
             with Image.open(img_path) as img:
                 buf = io.BytesIO()
-                img.convert("RGB").save(buf, format="PDF")
+                rgb = img.convert("RGB")
+                if jpeg_quality is not None:
+                    rgb.save(buf, format="PDF", quality=jpeg_quality, optimize=True)
+                else:
+                    rgb.save(buf, format="PDF")
             buf.seek(0)
             for page in PdfReader(buf).pages:
                 writer.add_page(page)
@@ -73,7 +86,11 @@ def _build_pdf_from_paths(paths: Iterable[Path], pdf_path: Path, password: str |
 
 
 def merge_webp_to_pdf(
-    folder_path: str | Path, pdf_path: str | Path, password: str | None = None
+    folder_path: str | Path,
+    pdf_path: str | Path,
+    password: str | None = None,
+    *,
+    jpeg_quality: int | None = None,
 ) -> int:
     """Merge all .webp/.jpg/.jpeg/.png files (recursive) under ``folder_path`` into ``pdf_path``.
 
@@ -84,13 +101,17 @@ def merge_webp_to_pdf(
     paths = list_album_image_paths(folder)
     if not paths:
         raise FileNotFoundError(f"no image files under {folder}")
-    n = _build_pdf_from_paths(paths, Path(pdf_path), password)
-    logger.info("pdf_built", path=str(pdf_path), pages=n)
+    n = _build_pdf_from_paths(paths, Path(pdf_path), password, jpeg_quality=jpeg_quality)
+    logger.info("pdf_built", path=str(pdf_path), pages=n, jpeg_quality=jpeg_quality)
     return n
 
 
 def merge_image_paths_to_pdf(
-    paths: list[Path], pdf_path: str | Path, password: str | None = None
+    paths: list[Path],
+    pdf_path: str | Path,
+    password: str | None = None,
+    *,
+    jpeg_quality: int | None = None,
 ) -> int:
     """Build a PDF from a pre-filtered list of image paths.
 
@@ -98,8 +119,8 @@ def merge_image_paths_to_pdf(
     """
     if not paths:
         raise FileNotFoundError("no image paths provided")
-    n = _build_pdf_from_paths(paths, Path(pdf_path), password)
-    logger.info("pdf_shard_built", path=str(pdf_path), pages=n)
+    n = _build_pdf_from_paths(paths, Path(pdf_path), password, jpeg_quality=jpeg_quality)
+    logger.info("pdf_shard_built", path=str(pdf_path), pages=n, jpeg_quality=jpeg_quality)
     return n
 
 
