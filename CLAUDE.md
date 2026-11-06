@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This project depends heavily on the third-party `jmcomic` library. **Anything you don't know about jmcomic — API signatures, plugin kwargs, exception types, `option.yml` fields, `dir_rule` DSL — you MUST look up in the docs/source before writing code. Do not rely on memory or training data; the library evolves quickly.**
 
-- **PyPI / version**: https://pypi.org/project/jmcomic/ — pin in `pyproject.toml` is `==2.6.18` (2026-04-07)
+- **PyPI / version**: https://pypi.org/project/jmcomic/ — pin in `pyproject.toml` is `==2.7.11` (dependency baseline updated 2026-11-05)
 - **中文文档首页**: https://jmcomic.readthedocs.io/zh-cn/latest/
 - **GitHub source** (authoritative when docs are incomplete): https://github.com/hect0x7/JMComic-Crawler-Python
   - `src/jmcomic/jm_plugin.py` — built-in plugins including `Img2pdfPlugin` (kwargs: `pdf_dir`, `filename_rule`, `dir_rule`, `delete_original_file`, `encrypt`)
-  - `src/jmcomic/jm_option.py` — option/dir_rule parsing, `AFIELD_ADVICE` hook (still present in 2.6.18, installed once at app startup in `services/jm_client.py::install_album_dirname_advice`)
+  - `src/jmcomic/jm_option.py` — option/dir_rule parsing, `AFIELD_ADVICE` hook (verified in 2.7.11, installed once at app startup in `services/jm_client.py::install_album_dirname_advice`)
   - `src/jmcomic/jm_client_impl.py` — `JmApiClient.search_site` / `categories_filter` signatures, `JmSearchPage.page_count` / `total`
-  - `src/jmcomic/jm_exception.py` — `JmcomicException` hierarchy (`MissingAlbumPhotoException`, `RequestRetryAllFailException`, `PartialDownloadFailedException`, `ResponseUnexpectedException`, `JsonResolveFailException`, `RegularNotMatchException`)
+  - `src/jmcomic/jm_exception.py` — `JmcomicException` hierarchy (`MissingAlbumPhotoException`, `RequestRetryAllFailException`, `PartialDownloadFailedException`, `DownloadCancelledException`, `ResponseUnexpectedException`, `JsonResolveFailException`, `RegularNotMatchException`)
 
 When upgrading jmcomic, diff `jm_exception.py` against the previous version — exception class additions/renames must be reflected in `src/jmcomic_api/errors.py`. Diff `JmAlbumDetail.__init__` and `JmSearchPage`/`JmCategoryPage` properties when route schemas (`schemas/catalog.py`) need updates.
 
@@ -23,13 +23,12 @@ FastAPI service that wraps the `jmcomic` Python client. Downloads albums as `.we
 ## Run / develop
 
 ```bash
-uv venv --python 3.12
-uv pip install -e ".[dev]"
+uv sync --python 3.12 --extra dev --locked
 uv run uvicorn jmcomic_api.app:app --reload
 # or: python -m jmcomic_api
 ```
 
-Tests: `uv run pytest tests/` (use `-m "not e2e"` to skip filesystem-touching e2e tests). Lint: `ruff check . && ruff format --check .`. Type-check: `mypy src`.
+Tests: `uv run --locked pytest tests/ -W error` (use `-m "not e2e"` to skip filesystem-touching e2e tests). Lint: `uv run --locked ruff check . && uv run --locked ruff format --check .`. Type-check: `uv run --locked mypy src`. Starlette's TestClient uses `httpx2` from the dev extra.
 
 Server-side config is read from environment variables (or `.env`) prefixed `JMAPI_` — see `.env.example`. Library-side config is `option.yml`. **`option.yml` is hot-reloadable via `SIGHUP`** (e.g. `docker kill -s HUP <container>`); the previous watchdog observer was replaced because editor atomic-writes double-fired the event.
 
@@ -58,15 +57,16 @@ Key invariants worth preserving:
 - **Album id normalisation**: `services/pdf_paths.py::clean_album_id` strips a leading `JM` prefix. Both `12345` and `JM12345` must resolve to the same cache slot — folder name `[12345]title`, filename `[12345] title.pdf`. The pre-rewrite code had this bug (`is_jm_book_exist` stripped the prefix but the folder-build path didn't), silently breaking cache reuse.
 - **Per-album serial generation**: `KeyedAsyncLock` keyed on `f"album:{clean_id}"`. Concurrent requests for the *same* album serialise (avoiding duplicate downloads / corrupt half-written PDFs); different albums run in parallel.
 - **Album-folder naming hook**: `JmModuleConfig.AFIELD_ADVICE['jmbook']` is set once at startup in the lifespan (`install_album_dirname_advice`). Don't move it back to module-import time — that produces side-effects in `pytest` collection.
-- **Sync jmcomic in async routes**: every jmcomic call in `services/jm_client.py` runs through `asyncio.to_thread`. **Never `await client.foo()` directly** — jmcomic is synchronous and would block the event loop.
+- **Sync jmcomic in async routes**: every jmcomic call in `services/jm_client.py` runs through an application-owned blocking pool (`concurrency/executors.py`), with `asyncio.to_thread` only as a standalone fallback. **Never `await client.foo()` directly** — jmcomic is synchronous and would block the event loop. Preserve task context, deadlines and drain ownership when changing executors.
 
 ## Caching and password semantics
 
-PDF cache lives at `<JMAPI_PDF_DIR>/<filename>.pdf`. On hit, `services/pdf_builder.py::cache_decryptable` opens with `pypdf.PdfReader` and checks whether the encrypted state matches the request's `enable_pwd` / `passwd` query param:
-
-- Encryption password is the **clean** album id (no `JM` prefix).
-- If the cache's encrypted state doesn't match the request, the cached PDF is deleted and rebuilt — flipping `passwd=true` ↔ `passwd=false` on the same album forces a rebuild every time.
-- Cache files written by the old PyPDF2 code may not decrypt under pypdf if the encryption algorithm differs; users should `rm -rf pdf/` once after upgrading.
+See `docs/optimization.md` for v2 cache, manifest, lifecycle and migration invariants.
+Internal identities are separate from display filenames. Quality, encryption and
+shard ranges coexist. Legacy PDFs remain intact; never recommend deleting caches.
+Verified hot PDFs use index + file attributes and must not scan images or open PdfReader.
+Downloads use cooperative DownloadControl and keep their permit until workers exit.
+Builds run in supervised subprocesses. Never return to unowned `wait_for(to_thread(...))`.
 
 ## Endpoints (legacy paths preserved)
 

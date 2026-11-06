@@ -4,7 +4,7 @@ All names use the ``jmapi_`` prefix and follow Prometheus naming conventions
 (``*_total`` for counters, ``*_seconds`` for time histograms).
 
 Wiring:
-- :func:`http_middleware` is registered in ``app.py`` to count + time every
+- :class:`ObservabilityMiddleware` is registered in ``app.py`` to count + time every
   request.
 - Service code calls :func:`record_download_outcome`, :func:`record_pdf_build`
   etc. directly.
@@ -14,16 +14,20 @@ Wiring:
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable
+import uuid
 
-from fastapi import FastAPI, Request
+import structlog
+from fastapi import FastAPI
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
 from starlette.responses import Response
+
+from jmcomic_api.logging_config import get_logger
 
 # ---- request-level -----------------------------------------------------------
 
@@ -63,6 +67,17 @@ CACHE_MISS_TOTAL = Counter(
     ["kind"],
 )
 
+TASKS = Gauge("jmapi_tasks", "Owned jobs by lane and state.", ["lane", "state"])
+QUEUE_DURATION = Histogram("jmapi_queue_wait_seconds", "Admission wait.", ["lane"])
+CANCELLATIONS = Counter("jmapi_cancellations_total", "Cooperative cancellations.", ["kind"])
+BUILD_FAILURES = Counter("jmapi_build_failures_total", "Failed PDF builds.", ["reason"])
+DISK_REJECTIONS = Counter("jmapi_disk_rejections_total", "Disk admission failures.")
+UPSTREAM_REQUESTS = Counter("jmapi_upstream_requests_total", "HTTP attempts.", ["outcome"])
+UPSTREAM_DURATION = Histogram("jmapi_upstream_request_seconds", "HTTP attempt duration.")
+SEND_TIMEOUTS = Counter(
+    "jmapi_response_send_timeouts_total", "Response sends exceeding idle timeout."
+)
+
 
 # ---- helpers ----------------------------------------------------------------
 
@@ -82,32 +97,83 @@ def record_cache(kind: str, hit: bool) -> None:
 # ---- ASGI plumbing ---------------------------------------------------------
 
 
-def _route_template(request: Request) -> str:
-    """Use the route's path *template* (``/get_pdf/{album_id}``) instead of the
-    concrete path so cardinality stays bounded.
-    """
-    route = request.scope.get("route")
-    if route and getattr(route, "path", None):
-        return route.path
-    return request.url.path
+RESPONSE_DURATION = Histogram(
+    "jmapi_response_duration_seconds",
+    "Full response send latency.",
+    ["method", "route"],
+    buckets=(0.05, 0.1, 0.2, 0.5, 1, 5, 30, 120, 600),
+)
+RESPONSE_OUTCOMES = Counter("jmapi_response_outcomes_total", "Response completion.", ["outcome"])
 
 
-async def http_middleware(
-    request: Request, call_next: Callable[[Request], Awaitable[Response]]
-) -> Response:
-    """Count + time every HTTP request. Skip ``/metrics`` itself to avoid recursion."""
-    if request.url.path == "/metrics":
-        return await call_next(request)
+class ObservabilityMiddleware:
+    def __init__(self, app, slow_threshold=5):
+        self.app, self.slow_threshold = app, slow_threshold
+        self.logger = get_logger(__name__)
 
-    start = time.monotonic()
-    response = await call_next(request)
-    elapsed = time.monotonic() - start
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        if scope["path"] == "/metrics":
+            return await self.app(scope, receive, send)
+        headers = dict(scope.get("headers", []))
+        request_id = headers.get(b"x-request-id", uuid.uuid4().hex[:12].encode())
+        tokens = structlog.contextvars.bind_contextvars(
+            request_id=request_id.decode("latin-1"),
+            method=scope["method"],
+            path=scope["path"],
+        )
+        start = time.monotonic()
+        status_code = 500
+        processing = None
+        outcome = "error"
+        finished = False
 
-    route = _route_template(request)
-    status_class = f"{response.status_code // 100}xx"
-    REQUEST_TOTAL.labels(method=request.method, route=route, status_class=status_class).inc()
-    REQUEST_DURATION.labels(method=request.method, route=route).observe(elapsed)
-    return response
+        async def observed_receive():
+            nonlocal outcome
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                outcome = "disconnect"
+            return message
+
+        async def observed_send(message):
+            nonlocal status_code, processing, outcome, finished
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                processing = time.monotonic() - start
+                message = dict(message)
+                message["headers"] = [*message.get("headers", []), (b"x-request-id", request_id)]
+            try:
+                await send(message)
+            except OSError:
+                outcome = "disconnect"
+                raise
+            if message["type"] in (
+                "http.response.body",
+                "http.response.pathsend",
+            ) and not message.get("more_body", False):
+                finished = True
+                outcome = "complete"
+
+        try:
+            await self.app(scope, observed_receive, observed_send)
+        finally:
+            elapsed = time.monotonic() - start
+            route = scope.get("route")
+            template = getattr(route, "path", "__unmatched__")
+            REQUEST_TOTAL.labels(scope["method"], template, f"{status_code // 100}xx").inc()
+            REQUEST_DURATION.labels(scope["method"], template).observe(
+                processing if processing is not None else elapsed
+            )
+            RESPONSE_DURATION.labels(scope["method"], template).observe(elapsed)
+            RESPONSE_OUTCOMES.labels(
+                outcome if finished or outcome == "disconnect" else "error"
+            ).inc()
+            if elapsed >= self.slow_threshold:
+                self.logger.warning(
+                    "slow_request", elapsed_seconds=round(elapsed, 3), status_code=status_code
+                )
+            structlog.contextvars.reset_contextvars(**tokens)
 
 
 def mount(app: FastAPI) -> None:

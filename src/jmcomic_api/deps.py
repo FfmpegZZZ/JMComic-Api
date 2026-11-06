@@ -17,6 +17,11 @@ def settings() -> Settings:
 
 
 def get_runtime(request: Request) -> JmRuntime:
+    from jmcomic_api.services.auth import request_runtime
+
+    selected = request_runtime.get()
+    if selected is not None:
+        return selected
     runtime: JmRuntime | None = getattr(request.app.state, "runtime", None)
     if runtime is None:
         raise RuntimeError("jmcomic runtime not initialised; lifespan did not run")

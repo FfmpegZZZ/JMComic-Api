@@ -8,19 +8,20 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_search_timeout_propagates(monkeypatch):
+async def test_search_timeout_propagates():
     """``jm_client.search`` honours the timeout argument."""
     from jmcomic_api.services import jm_client
 
-    monkeypatch.setattr(
-        jm_client,
-        "_bounded",
-        AsyncMock(side_effect=TimeoutError("simulated upstream hang")),
-    )
-
     fake_client = MagicMock()
+
+    def slow_search(**kwargs):
+        import time
+
+        time.sleep(0.05)
+
+    fake_client.search_site.side_effect = slow_search
     with pytest.raises(TimeoutError):
-        await jm_client.search(fake_client, "anything", 1, timeout=0.1)
+        await jm_client.search(fake_client, "anything", 1, timeout=0.01)
 
 
 @pytest.mark.asyncio

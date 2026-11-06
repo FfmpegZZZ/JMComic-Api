@@ -19,28 +19,33 @@ import asyncio
 import contextlib
 import signal
 import time
-import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 
-import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import Response
+from jmcomic import JmSyncRuntime
 
 from jmcomic_api import __version__, metrics
+from jmcomic_api.concurrency.executors import BlockingPools
 from jmcomic_api.concurrency.keyed_lock import KeyedAsyncLock
+from jmcomic_api.concurrency.tasks import Lane, TaskManager
 from jmcomic_api.deps import settings
 from jmcomic_api.errors import register_handlers
 from jmcomic_api.logging_config import configure as configure_logging
 from jmcomic_api.logging_config import get_logger
+from jmcomic_api.routers import auth as auth_router
 from jmcomic_api.routers import catalog as catalog_router
 from jmcomic_api.routers import health as health_router
 from jmcomic_api.routers import pdf as pdf_router
 from jmcomic_api.services.album import AlbumService, ReliabilityConfig
+from jmcomic_api.services.auth import AuthRegistry, request_runtime
 from jmcomic_api.services.jm_client import (
     install_album_dirname_advice,
     load_runtime,
 )
+from jmcomic_api.services.network import NetworkPolicy
+from jmcomic_api.services.queries import QueryCache
 
 
 def create_app() -> FastAPI:
@@ -54,7 +59,55 @@ def create_app() -> FastAPI:
         cfg.pdf_path.mkdir(parents=True, exist_ok=True)
         cfg.shard_cache_path.mkdir(parents=True, exist_ok=True)
         app.state.settings = cfg
-        app.state.runtime = load_runtime(cfg.option_file)
+        policy = NetworkPolicy()
+
+        def load_configured_runtime():
+            if cfg.auth_enabled:
+                return load_runtime(cfg.option_file, anonymous=True, policy=policy)
+            return load_runtime(cfg.option_file)
+
+        app.state.runtime = await asyncio.to_thread(load_configured_runtime)
+        Path(app.state.runtime.opt.dir_rule.base_dir).mkdir(parents=True, exist_ok=True)
+        pools = JmSyncRuntime(photo_workers=cfg.chapter_threads, image_workers=cfg.image_threads)
+        app.state.runtime.sync = pools
+        blocking = BlockingPools(
+            downloads=cfg.max_concurrent_downloads,
+            metadata=cfg.max_concurrent_metadata,
+            encoding=cfg.max_concurrent_base64,
+        )
+        app.state.blocking = blocking
+        app.state.runtime.executors = blocking
+        manager = TaskManager(wait_timeout=cfg.lock_acquire_timeout_seconds)
+        app.state.manager = manager
+        try:
+            app.state.auth = (
+                await asyncio.to_thread(
+                    AuthRegistry, cfg, manager, blocking, pools, app.state.runtime.template, policy
+                )
+                if cfg.auth_enabled
+                else None
+            )
+        except BaseException:
+            app.state.runtime.retire()
+            await asyncio.to_thread(pools.close)
+            await asyncio.to_thread(blocking.close)
+            raise
+        app.state.metadata_lane = Lane(
+            "metadata", cfg.max_concurrent_metadata, cfg.queue_capacity, cfg.queue_timeout_seconds
+        )
+        app.state.queries = QueryCache(manager, app.state.metadata_lane)
+        app.state.base64_lane = Lane(
+            "base64",
+            cfg.max_concurrent_base64,
+            max(cfg.queue_capacity, cfg.max_concurrent_base64_streams - cfg.max_concurrent_base64),
+            cfg.queue_timeout_seconds,
+        )
+        app.state.base64_stream_lane = Lane(
+            "base64_stream",
+            cfg.max_concurrent_base64_streams,
+            cfg.queue_capacity,
+            cfg.queue_timeout_seconds,
+        )
 
         # Reliability stack: global download semaphore + keyed lock + tunable
         # retry/timeout config. Constructing them here (not at import time)
@@ -63,13 +116,13 @@ def create_app() -> FastAPI:
         app.state.album_lock = KeyedAsyncLock()
         app.state.last_download_unix = None  # surfaced by /health/ready
         # Tracked tasks for graceful shutdown.
-        app.state.tasks = set()
+        app.state.tasks = manager.tasks
 
         def _mark_download_success() -> None:
             app.state.last_download_unix = time.time()
 
         app.state.album_service = AlbumService(
-            lambda: app.state.runtime,
+            lambda: request_runtime.get() or app.state.runtime,
             lock=app.state.album_lock,
             download_semaphore=app.state.download_semaphore,
             reliability=ReliabilityConfig(
@@ -80,6 +133,18 @@ def create_app() -> FastAPI:
                 download_retry_max_wait=cfg.download_retry_max_wait,
             ),
             on_download_success=_mark_download_success,
+            manager=manager,
+            download_lane=Lane(
+                "download",
+                cfg.max_concurrent_downloads,
+                cfg.queue_capacity,
+                cfg.queue_timeout_seconds,
+            ),
+            pdf_lane=Lane(
+                "pdf", cfg.max_concurrent_pdf_builds, cfg.queue_capacity, cfg.queue_timeout_seconds
+            ),
+            lock_timeout=cfg.lock_acquire_timeout_seconds,
+            settings=cfg,
         )
         logger.info(
             "startup_complete",
@@ -91,12 +156,65 @@ def create_app() -> FastAPI:
 
         loop = asyncio.get_running_loop()
 
-        def _reload_runtime() -> None:
-            try:
-                app.state.runtime = load_runtime(cfg.option_file)
-                logger.info("option_reloaded", path=str(cfg.option_path))
-            except Exception as e:
-                logger.error("option_reload_failed", error=str(e))
+        reload_lock = asyncio.Lock()
+
+        async def _reload():
+            async with reload_lock:
+                try:
+                    loading = asyncio.create_task(asyncio.to_thread(load_configured_runtime))
+                    try:
+                        replacement = await asyncio.shield(loading)
+                    except asyncio.CancelledError:
+                        from jmcomic_api.concurrency.tasks import drain
+
+                        await drain(loading)
+                        if not loading.cancelled() and loading.exception() is None:
+                            loading.result().retire()
+                        raise
+                    replacement.sync = pools
+                    replacement.executors = blocking
+                    if manager.closing:
+                        replacement.retire()
+                        return
+                    old = app.state.runtime
+                    app.state.runtime = replacement
+                    old.retire()
+                    app.state.queries.clear()
+                    if app.state.auth is not None:
+                        await app.state.auth.invalidate_runtimes(replacement.template)
+                    logger.info("option_reloaded", path=str(cfg.option_path))
+                except Exception as e:
+                    logger.error("option_reload_failed", error=str(e))
+
+        def _reload_runtime():
+            if not manager.closing:
+                manager.track(_reload(), name="reload")
+
+        app.state.reload_runtime = _reload
+
+        async def maintenance():
+            from jmcomic_api.services.storage import cleanup
+
+            while True:
+                roots = [
+                    cfg.pdf_path,
+                    cfg.shard_cache_path,
+                    Path(app.state.runtime.opt.dir_rule.base_dir).resolve(),
+                ]
+                try:
+                    if app.state.auth is not None:
+                        await app.state.auth.maintenance()
+                    await asyncio.to_thread(
+                        cleanup,
+                        roots,
+                        ttl=cfg.pdf_cache_ttl_seconds,
+                        max_bytes=cfg.pdf_cache_max_mb * 1024**2,
+                    )
+                except OSError as error:
+                    logger.warning("storage_cleanup_failed", error=str(error))
+                await asyncio.sleep(cfg.cleanup_interval_seconds)
+
+        maintenance_task = asyncio.create_task(maintenance(), name="storage-maintenance")
 
         # SIGHUP handlers only work on the main thread of the main interpreter.
         # Skip silently in test harnesses that run the loop in a worker thread.
@@ -109,20 +227,30 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
-            # Graceful shutdown: cancel every tracked task and wait up to
-            # ``shutdown_grace_seconds`` for them to finish. Any survivors get
-            # forcibly killed by uvicorn / the supervisor afterward.
-            tasks = [t for t in getattr(app.state, "tasks", set()) if not t.done()]
-            if tasks:
-                logger.info("lifespan_shutdown_cancelling", tasks=len(tasks))
-                for t in tasks:
-                    t.cancel()
-                done, pending = await asyncio.wait(tasks, timeout=cfg.shutdown_grace_seconds)
-                logger.info(
-                    "lifespan_shutdown_drained",
-                    completed=len(done),
-                    still_running=len(pending),
-                )
+            maintenance_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await maintenance_task
+            survivors = await manager.shutdown(cfg.shutdown_grace_seconds)
+            if app.state.auth is not None:
+                app.state.auth.close()
+            app.state.runtime.retire()
+
+            # A cooperative upstream thread may outlive the grace period. Its
+            # runtime leases and pools stay alive until it really exits.
+            async def close_pools():
+                from jmcomic_api.concurrency.tasks import drain
+
+                for task in tuple(manager.tasks):
+                    await drain(task)
+                if app.state.auth is not None:
+                    app.state.auth.close()
+                await drain(asyncio.create_task(asyncio.to_thread(pools.close)))
+                await drain(asyncio.create_task(asyncio.to_thread(blocking.close)))
+
+            pool_cleanup = asyncio.create_task(close_pools(), name="pool-cleanup")
+            if not survivors:
+                await pool_cleanup
+            logger.info("lifespan_shutdown_drained", still_running=survivors)
             if signal_installed:
                 with contextlib.suppress(NotImplementedError, ValueError):
                     loop.remove_signal_handler(signal.SIGHUP)
@@ -139,39 +267,20 @@ def create_app() -> FastAPI:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=cfg.cors_origins,
-            allow_methods=["GET"],
+            allow_methods=["GET", "POST", "DELETE"],
             allow_headers=["*"],
         )
 
-    @app.middleware("http")
-    async def _request_context(request: Request, call_next):
-        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
-        structlog.contextvars.clear_contextvars()
-        structlog.contextvars.bind_contextvars(
-            request_id=request_id,
-            method=request.method,
-            path=request.url.path,
-        )
-        start = time.monotonic()
-        response: Response = await call_next(request)
-        elapsed = time.monotonic() - start
-        response.headers["x-request-id"] = request_id
-        if elapsed >= cfg.slow_request_threshold_seconds:
-            logger.warning(
-                "slow_request",
-                elapsed_seconds=round(elapsed, 3),
-                status_code=response.status_code,
-            )
-        return response
-
-    # Metrics middleware must wrap routes to observe their final status.
-    app.middleware("http")(metrics.http_middleware)
+    app.add_middleware(
+        metrics.ObservabilityMiddleware, slow_threshold=cfg.slow_request_threshold_seconds
+    )
     metrics.mount(app)
 
     register_handlers(app)
     app.include_router(health_router.router)
     app.include_router(pdf_router.router)
     app.include_router(catalog_router.router)
+    app.include_router(auth_router.router)
 
     @app.get("/docs/external", include_in_schema=False)
     async def _legacy_docs_redirect():

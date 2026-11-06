@@ -18,6 +18,7 @@ from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jmcomic.jm_exception import (
+    DownloadCancelledException,
     JmcomicException,
     MissingAlbumPhotoException,
     PartialDownloadFailedException,
@@ -55,7 +56,10 @@ def register_handlers(app: FastAPI) -> None:
         # 404/422 are normal — info; everything else gets a warning.
         log = logger.info if exc.status_code < 500 else logger.warning
         log("http_error", status=exc.status_code, message=message)
-        return _envelope(message, exc.status_code)
+        response = _envelope(message, exc.status_code)
+        if exc.headers:
+            response.headers.update(exc.headers)
+        return response
 
     @app.exception_handler(FastAPIHTTPException)
     async def _http_fastapi(request: Request, exc: FastAPIHTTPException):
@@ -71,7 +75,9 @@ def register_handlers(app: FastAPI) -> None:
             fields.append(f"{loc}: {msg}")
         message = "validation failed: " + "; ".join(fields) if fields else "validation failed"
         logger.info("validation_error", fields=fields)
-        return _envelope(message, 422, errors=exc.errors())
+        # Body inputs and validator contexts can include plaintext passwords.
+        errors = [{k: e[k] for k in ("type", "loc", "msg") if k in e} for e in exc.errors()]
+        return _envelope(message, 422, errors=errors)
 
     @app.exception_handler(MissingAlbumPhotoException)
     async def _missing(_request: Request, exc: MissingAlbumPhotoException):
@@ -87,6 +93,13 @@ def register_handlers(app: FastAPI) -> None:
     async def _partial(_request: Request, exc: PartialDownloadFailedException):
         logger.warning("partial_download_failed", error=str(exc))
         resp = _envelope("Some images failed to download; try again later", 503)
+        resp.headers["Retry-After"] = "30"
+        return resp
+
+    @app.exception_handler(DownloadCancelledException)
+    async def _cancelled(_request: Request, exc: DownloadCancelledException):
+        logger.info("download_cancelled", reason=exc.reason)
+        resp = _envelope("Download cancelled; try again later", 503)
         resp.headers["Retry-After"] = "30"
         return resp
 

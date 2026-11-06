@@ -14,15 +14,15 @@ Reliability invariants:
 from __future__ import annotations
 
 import contextlib
-import io
 import os
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
-from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
 from jmcomic_api.logging_config import get_logger
+from jmcomic_api.services.page_cache import evict, page_stream
 
 logger = get_logger(__name__)
 
@@ -33,11 +33,14 @@ def _build_pdf_from_paths(
     password: str | None,
     *,
     jpeg_quality: int | None = None,
+    jpeg_optimize: bool = True,
+    page_cache_dir: str | None = None,
+    page_cache_bytes: int = 512 * 1024**2,
 ) -> int:
     """Write a PDF atomically. Returns page count.
 
     Strategy:
-    1. Write to ``<pdf_path>.tmp``.
+    1. Write to a unique temporary sibling.
     2. ``os.replace()`` to final location (POSIX atomic, also works on Windows).
     3. On any exception, remove the ``.tmp`` file so we don't leak partial output.
 
@@ -45,26 +48,29 @@ def _build_pdf_from_paths(
     DCT-encoded JPEG at that quality — gives a much smaller PDF for sharing.
     """
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = pdf_path.with_suffix(pdf_path.suffix + ".tmp")
-    # Pre-clean a stale tmp from a prior crashed run.
-    with contextlib.suppress(FileNotFoundError):
-        tmp_path.unlink()
+    fd, temporary = tempfile.mkstemp(prefix=".jmapi-build-", suffix=".pdf.tmp", dir=pdf_path.parent)
+    os.close(fd)
+    tmp_path = Path(temporary)
 
     writer = PdfWriter()
     n = 0
     try:
+        if page_cache_dir and page_cache_bytes:
+            evict(Path(page_cache_dir), page_cache_bytes)
         for img_path in paths:
-            with Image.open(img_path) as img:
-                buf = io.BytesIO()
-                rgb = img.convert("RGB")
-                if jpeg_quality is not None:
-                    rgb.save(buf, format="PDF", quality=jpeg_quality, optimize=True)
-                else:
-                    rgb.save(buf, format="PDF")
-            buf.seek(0)
-            for page in PdfReader(buf).pages:
-                writer.add_page(page)
-                writer.pages[-1].compress_content_streams()
+            with page_stream(
+                img_path,
+                root=Path(page_cache_dir) if page_cache_dir else None,
+                capacity=page_cache_bytes,
+                jpeg_quality=jpeg_quality,
+                jpeg_optimize=jpeg_optimize,
+            ) as stream:
+                reader = PdfReader(stream)
+                try:
+                    for page in reader.pages:
+                        writer.add_page(page)
+                finally:
+                    reader.close()
             n += 1
 
         if n == 0:
@@ -82,6 +88,8 @@ def _build_pdf_from_paths(
         with contextlib.suppress(FileNotFoundError):
             tmp_path.unlink()
         raise
+    finally:
+        writer.close()
     return n
 
 
@@ -91,6 +99,9 @@ def merge_webp_to_pdf(
     password: str | None = None,
     *,
     jpeg_quality: int | None = None,
+    jpeg_optimize: bool = True,
+    page_cache_dir: str | None = None,
+    page_cache_bytes: int = 512 * 1024**2,
 ) -> int:
     """Merge all .webp/.jpg/.jpeg/.png files (recursive) under ``folder_path`` into ``pdf_path``.
 
@@ -101,7 +112,15 @@ def merge_webp_to_pdf(
     paths = list_album_image_paths(folder)
     if not paths:
         raise FileNotFoundError(f"no image files under {folder}")
-    n = _build_pdf_from_paths(paths, Path(pdf_path), password, jpeg_quality=jpeg_quality)
+    n = _build_pdf_from_paths(
+        paths,
+        Path(pdf_path),
+        password,
+        jpeg_quality=jpeg_quality,
+        jpeg_optimize=jpeg_optimize,
+        page_cache_dir=page_cache_dir,
+        page_cache_bytes=page_cache_bytes,
+    )
     logger.info("pdf_built", path=str(pdf_path), pages=n, jpeg_quality=jpeg_quality)
     return n
 
@@ -112,6 +131,9 @@ def merge_image_paths_to_pdf(
     password: str | None = None,
     *,
     jpeg_quality: int | None = None,
+    jpeg_optimize: bool = True,
+    page_cache_dir: str | None = None,
+    page_cache_bytes: int = 512 * 1024**2,
 ) -> int:
     """Build a PDF from a pre-filtered list of image paths.
 
@@ -119,7 +141,15 @@ def merge_image_paths_to_pdf(
     """
     if not paths:
         raise FileNotFoundError("no image paths provided")
-    n = _build_pdf_from_paths(paths, Path(pdf_path), password, jpeg_quality=jpeg_quality)
+    n = _build_pdf_from_paths(
+        paths,
+        Path(pdf_path),
+        password,
+        jpeg_quality=jpeg_quality,
+        jpeg_optimize=jpeg_optimize,
+        page_cache_dir=page_cache_dir,
+        page_cache_bytes=page_cache_bytes,
+    )
     logger.info("pdf_shard_built", path=str(pdf_path), pages=n, jpeg_quality=jpeg_quality)
     return n
 
@@ -151,36 +181,16 @@ def cache_decryptable(
     page-count gate catches it.
     """
     try:
-        reader = PdfReader(str(pdf_path))
-    except Exception as e:
-        logger.warning("cache_read_failed", path=str(pdf_path), error=str(e))
+        with open(pdf_path, "rb") as stream:
+            reader = PdfReader(stream)
+            try:
+                if bool(reader.is_encrypted) != (password is not None):
+                    return False
+                if password is not None and not reader.decrypt(password):
+                    return False
+                return expected_pages is None or len(reader.pages) == expected_pages
+            finally:
+                reader.close()
+    except Exception as error:
+        logger.warning("cache_read_failed", path=str(pdf_path), error=str(error))
         return False
-
-    if password is None:
-        if reader.is_encrypted:
-            return False
-    else:
-        if not reader.is_encrypted:
-            return False
-        try:
-            if not reader.decrypt(password):
-                return False
-        except Exception as e:
-            logger.warning("cache_decrypt_failed", path=str(pdf_path), error=str(e))
-            return False
-
-    if expected_pages is not None:
-        try:
-            actual = len(reader.pages)
-        except Exception as e:
-            logger.warning("cache_page_count_failed", path=str(pdf_path), error=str(e))
-            return False
-        if actual != expected_pages:
-            logger.info(
-                "cache_page_count_mismatch",
-                path=str(pdf_path),
-                expected=expected_pages,
-                actual=actual,
-            )
-            return False
-    return True

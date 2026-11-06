@@ -83,7 +83,7 @@ def test_get_pdf_returns_404_when_album_missing(client):
     tc.app.state.album_service.get_or_build = AsyncMock(
         side_effect=MissingAlbumPhotoException("not found", {})
     )
-    resp = tc.get("/get_pdf/missing")
+    resp = tc.get("/get_pdf/404")
     assert resp.status_code == 404
     assert resp.json()["success"] is False
 
@@ -106,10 +106,10 @@ def test_album_details_404_uses_unified_envelope(client, monkeypatch):
 
     monkeypatch.setattr(jm, "get_album_detail", AsyncMock(return_value=None))
     tc, _ = client
-    resp = tc.get("/album/missing")
+    resp = tc.get("/album/404")
     assert resp.status_code == 404
     body = resp.json()
-    assert body == {"success": False, "message": "Album with ID 'missing' not found."}
+    assert body == {"success": False, "message": "Album with ID '404' not found."}
 
 
 def test_search_returns_results(client, make_page, monkeypatch):
@@ -152,7 +152,7 @@ def test_album_details_404_when_falsy(client, monkeypatch):
     monkeypatch.setattr(jm, "get_album_detail", AsyncMock(return_value=None))
 
     tc, _ = client
-    resp = tc.get("/album/missing")
+    resp = tc.get("/album/404")
     assert resp.status_code == 404
 
 

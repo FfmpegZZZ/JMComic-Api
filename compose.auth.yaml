@@ -1,0 +1,10 @@
+# Enable alongside compose.yaml. Generate the key and state directory first.
+services:
+  jmcomic-api:
+    environment:
+      JMAPI_AUTH_ENABLED: "true"
+      JMAPI_AUTH_KEY_FILE: /run/secrets/jmapi-auth.key
+      JMAPI_AUTH_STATE_DIR: /app/state/sessions
+    volumes:
+      - ./secrets/session.key:/run/secrets/jmapi-auth.key:ro
+      - ./state/sessions:/app/state/sessions

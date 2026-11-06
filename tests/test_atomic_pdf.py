@@ -69,7 +69,7 @@ def test_crash_mid_build_leaves_no_partial_or_tmp(tmp_path):
     assert not (tmp_path / "out.pdf.tmp").exists(), "tmp file must be cleaned up"
 
 
-def test_stale_tmp_from_previous_run_is_overwritten(tmp_path):
+def test_unique_temporary_does_not_delete_another_builds_file(tmp_path):
     """If a previous crash left a .tmp file, the next build must clean it before writing."""
     paths = _three_webps(tmp_path / "src")
     out = tmp_path / "out.pdf"
@@ -79,7 +79,7 @@ def test_stale_tmp_from_previous_run_is_overwritten(tmp_path):
     merge_image_paths_to_pdf(paths, out)
     assert out.exists()
     # The .tmp from before should have been replaced (and then renamed).
-    assert not stale_tmp.exists()
+    assert stale_tmp.read_bytes() == b"garbage from a previous crash"
 
 
 def test_cache_decryptable_rejects_wrong_page_count(tmp_path):

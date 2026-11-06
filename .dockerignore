@@ -1,7 +1,6 @@
 # Don't ship dev artifacts into the image even if Dockerfile expands COPY scope.
 .venv/
 .git/
-.github/
 .idea/
 .vscode/
 .pytest_cache/
@@ -18,8 +17,12 @@ pdf_cache/
 webp/
 .locks/
 .DS_Store
-tests/
 # README.md is referenced by pyproject.toml::project.readme — must be in context.
 CLAUDE.md
 .env
 .env.local
+
+.benchmark/
+benchmark-results/
+state/
+secrets/

@@ -2,6 +2,12 @@
 
 本仓库基于 [LingLambda/JMComic-Api](https://github.com/LingLambda/JMComic-Api) 修改，提供一个用于与禁漫天堂（JMComic）交互的 Web API 服务。
 
+## v2.1 更新
+
+升级 jmcomic 至 2.7.11，加入任务合并与有界并发、可取消下载、独立进程构建 PDF、v2 缓存、流式 Base64 和可选多用户登录。继续采用单实例、单进程、本地文件存储；原有接口与默认返回方式保留，旧文件按需迁移。
+
+Python 3.12 / 3.13 各 172 项测试通过；已在 ARM64 机器完成真实上游和账号登录验证。实测收益与首次构建的性能取舍见 [ARM 报告](docs/arm-benchmark-2026-11-06.md)，配置和迁移要求见 [优化说明](docs/optimization.md)。
+
 ## 2026 重构 (v2.0)
 
 整套底层重写，从 Flask + waitress + PyPDF2 迁移到 **FastAPI + uvicorn + pypdf**，并升级 jmcomic 到 `2.6.18`。
@@ -28,7 +34,7 @@ compose.yaml
 | 入口 | `python main.py` | `python -m jmcomic_api` 或 `uvicorn jmcomic_api.app:app` |
 | 配置文件 | 改 `app/core/config.py` 源码 | 环境变量 / `.env`（前缀 `JMAPI_`） |
 | `option.yml` 热重载 | watchdog 文件监听（双触发问题） | `kill -HUP <pid>` 信号触发 |
-| PDF 加密引擎 | PyPDF2 | pypdf 8（**旧缓存可能无法解密，建议清空 `pdf/` 一次**） |
+| PDF 加密引擎 | PyPDF2 | pypdf（版本以 `uv.lock` 为准；旧文件保留，按需生成 v2 缓存） |
 | `JM`-前缀 ID | 缓存被破坏（bug） | `JM12345` / `12345` 同一缓存 |
 | 错误响应 | 笼统 500 | 按 `JmcomicException` 子类映射 404 / 502 / 503 |
 | 文档 | `/docs` 跳转 apifox | FastAPI 自动 `/docs` Swagger UI |
@@ -46,9 +52,8 @@ compose.yaml
 # 安装 uv（首次）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 创建 venv 并装依赖
-uv venv --python 3.12
-uv pip install -e ".[dev]"
+# 按锁文件创建 venv 并装依赖（含本地测试工具）
+uv sync --python 3.12 --extra dev --locked
 
 # （可选）复制 .env 配置
 cp .env.example .env
@@ -59,6 +64,17 @@ uv run uvicorn jmcomic_api.app:app --host 0.0.0.0 --port 8699
 ```
 
 启动后访问 `http://localhost:8699/docs` 查看自动生成的 Swagger UI。
+
+本地验证（Python 3.12 / 3.13）：
+
+```bash
+uv run --locked pytest tests/ -W error
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked mypy src
+```
+
+测试包含真实图片转 PDF、JPEG 压缩、加解密和分片验证；搜索、下载等上游网络请求使用模拟数据，不依赖 JM 站点可用性。2026-11-05 更新的核心依赖为 `jmcomic 2.7.11`、`FastAPI 0.162.0`、`pypdf 6.21.4`、`Pillow 13.0.0`，完整版本见 `uv.lock`。
 
 ### 使用 Docker
 
@@ -135,7 +151,7 @@ docker kill -s HUP jmcomic-api
     {
         "success": true,
         "message": "PDF 获取成功",
-        "data": "/path/to/server/pdf/folder/[12345] 标题.pdf",
+        "data": "/path/to/server/pdf/v2/12345/<内容键>.pdf",
         "name": "[12345] 标题.pdf"
     }
     ```
@@ -248,3 +264,9 @@ docker kill -s HUP jmcomic-api
     }
     ```
 *   **示例:** `GET /categories?category=hanman&order_by=view&page=3`
+
+本轮任务、缓存、流式传输及新配置详见 [优化与迁移说明](docs/optimization.md)。Docker 本地测试及原版对比见 [运行步骤](docs/docker-comparison.md)。旧 PDF 按需迁移并默认保留，不需要清空缓存目录。
+
+上游请求、jmcomic 原生异步能力及后续实施顺序见 [上游网络优化评估](docs/upstream-review.md)。
+
+多用户登录、加密保存密码、每次读取个人资料重新登录，以及收藏和签到接口见 [个人账号说明](docs/personal-accounts.md)。功能默认关闭，按说明生成持久密钥后启用。

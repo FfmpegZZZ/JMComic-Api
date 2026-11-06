@@ -1,73 +1,73 @@
-"""Health endpoints.
-
-- ``/health``       — Flask-era backward-compat shim, always 200 if process is up.
-- ``/health/live``  — process liveness (cheap; never blocks). Use for k8s
-  ``livenessProbe`` so a hung downstream doesn't restart the pod.
-- ``/health/ready`` — actual readiness: jmcomic runtime initialised, PDF dir
-  writable, disk has at least ``min_free_disk_mb`` MB. Use for k8s
-  ``readinessProbe`` and load-balancer health checks.
-"""
+"""Cheap liveness and threaded storage/readiness probes."""
 
 from __future__ import annotations
 
+import asyncio
 import shutil
+import tempfile
 import time
+from pathlib import Path
 
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter(tags=["health"])
 
-# Minimum free disk required to keep accepting traffic. Below this we report
-# not-ready so the LB sheds load. Tunable via ``JMAPI_MIN_FREE_DISK_MB`` if we
-# ever surface it; default 500 MB is enough for a few albums of headroom.
-DEFAULT_MIN_FREE_DISK_MB = 500
-
 
 @router.get("/health")
-async def health_legacy() -> dict:
-    """Backward-compat endpoint preserved from the Flask era."""
-    return {"status": "ok"}
-
-
 @router.get("/health/live")
-async def liveness() -> dict:
+async def liveness():
     return {"status": "ok"}
+
+
+def storage_status(roots, min_mb):
+    writable, free = {}, []
+    for name, root in roots.items():
+        try:
+            # An actual exclusive create/unlink tests effective permissions,
+            # including ACLs and bind mounts (os.access would miss failures).
+            with tempfile.TemporaryFile(dir=root):
+                pass
+            writable[name] = True
+            free.append(shutil.disk_usage(root).free / 1024**2)
+        except OSError:
+            writable[name] = False
+            free.append(-1)
+    minimum = min(free)
+    return dict(
+        storage_writable=writable,
+        pdf_dir_ok=writable["pdf"],
+        disk_ok=minimum >= min_mb,
+        free_disk_mb=round(minimum, 1),
+    )
 
 
 @router.get("/health/ready")
-async def readiness(request: Request) -> JSONResponse:
-    settings = request.app.state.settings
-    runtime = getattr(request.app.state, "runtime", None)
-
-    pdf_dir_ok = settings.pdf_path.exists() and settings.pdf_path.is_dir()
-
-    # Disk space probe — pdf cache + webp downloads can blow up fast.
-    try:
-        usage = shutil.disk_usage(settings.pdf_path)
-        free_mb = usage.free / (1024 * 1024)
-    except OSError:
-        free_mb = -1
-    min_free_mb = getattr(settings, "min_free_disk_mb", DEFAULT_MIN_FREE_DISK_MB)
-    disk_ok = free_mb >= min_free_mb
-
-    # Last successful download — handy when triaging "why is everything stuck"
-    # incidents. Set by services/album.py on success; None until first hit.
-    last_success = getattr(request.app.state, "last_download_unix", None)
-    last_success_age = (time.time() - last_success) if last_success else None
-
-    components = {
-        "runtime": runtime is not None,
-        "pdf_dir_ok": pdf_dir_ok,
-        "disk_ok": disk_ok,
-        "free_disk_mb": round(free_mb, 1),
-        "min_free_disk_mb": min_free_mb,
-        "last_download_age_seconds": last_success_age,
-    }
-
-    if not (runtime is not None and pdf_dir_ok and disk_ok):
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "not_ready", **components},
-        )
-    return JSONResponse(content={"status": "ready", **components})
+async def readiness(request: Request):
+    state = request.app.state
+    cfg, runtime = state.settings, getattr(state, "runtime", None)
+    roots = dict(pdf=cfg.pdf_path, shard=cfg.shard_cache_path)
+    if cfg.auth_enabled:
+        roots["sessions"] = cfg.auth_state_dir.resolve()
+    if runtime is not None:
+        roots["images"] = Path(runtime.opt.dir_rule.base_dir).resolve()
+    result = await asyncio.to_thread(storage_status, roots, cfg.min_free_disk_mb)
+    last = state.last_download_unix
+    closing = state.manager.closing
+    ready = (
+        runtime is not None
+        and all(result["storage_writable"].values())
+        and result["disk_ok"]
+        and not closing
+    )
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content=dict(
+            status="ready" if ready else "not_ready",
+            runtime=runtime is not None,
+            closing=closing,
+            min_free_disk_mb=cfg.min_free_disk_mb,
+            last_download_age_seconds=time.time() - last if last else None,
+            **result,
+        ),
+    )

@@ -1,16 +1,8 @@
-"""Tests for the ``.done`` marker completeness invariant.
-
-Lock in:
-- folder + ``.done`` → cache hit (no download triggered)
-- folder + no ``.done`` → re-trigger download
-- folder absent → fresh download
-- after partial download (actual < expected pages), ``.done`` is NOT created
-  AND ``PartialDownloadFailedException`` propagates (so caller sees 503)
-"""
+"""Trusted manifest migration, missing/corrupt images and upstream page order."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,97 +10,67 @@ from jmcomic.jm_exception import PartialDownloadFailedException
 from PIL import Image
 
 from jmcomic_api.services import jm_client
-from jmcomic_api.services.album import DONE_MARKER, AlbumService
-
-
-def _make_album_folder(base: Path, album_id: str, title: str, num_pages: int) -> Path:
-    folder = base / f"[{album_id}]{title}"
-    folder.mkdir(parents=True, exist_ok=True)
-    for i in range(num_pages):
-        Image.new("RGB", (16, 16), "white").save(folder / f"{i:04}.webp")
-    return folder
+from jmcomic_api.services.album import AlbumService
+from jmcomic_api.services.jm_client import JmRuntime
+from jmcomic_api.services.storage import manifest_path, read_json
+from jmcomic_api.settings import Settings
+from tests.helpers import download_result
 
 
 @pytest.fixture
-def runtime(tmp_path):
-    rt = MagicMock()
-    rt.opt.dir_rule.base_dir = str(tmp_path / "webp")
-    (tmp_path / "webp").mkdir()
-    return rt
+def album_setup(tmp_path, monkeypatch):
+    root = tmp_path / "images"
+    folder = root / "[123]Same title"
+    folder.mkdir(parents=True)
+    paths = [folder / "chapter2-001.webp", folder / "chapter1-002.webp"]
+    for i, path in enumerate(paths):
+        Image.new("RGB", (16 + i, 24), "white").save(path)
+    album = MagicMock()
+    album.name, album.page_count = "Same title", 2
+    rt = JmRuntime(SimpleNamespace(dir_rule=SimpleNamespace(base_dir=str(root))), None)
+    cfg = Settings(pdf_dir=tmp_path / "pdf", min_free_disk_mb=0)
+    service = AlbumService(lambda: rt, settings=cfg)
+    mocked = AsyncMock(return_value=download_result(album, paths))
+    monkeypatch.setattr(jm_client, "download_with_retry", mocked)
+    return service, rt, folder, paths, mocked
 
 
-@pytest.fixture
-def service(runtime):
-    return AlbumService(runtime_provider=lambda: runtime)
+async def test_legacy_done_is_migrated_using_ordered_download_manifest(album_setup):
+    service, _rt, folder, paths, download = album_setup
+    (folder / ".done").touch()
+    meta = await service.metadata("jM00123")
+    assert meta.images == paths  # deliberate non-lexical chapter order
+    assert download.await_count == 1
+    persisted = read_json(manifest_path(folder.parent, "123"))
+    assert persisted["expected_pages"] == 2
+    assert all(len(entry["digest"]) == 64 for entry in persisted["entries"])
+    assert (await service.metadata("JM123")).images == paths
+    assert download.await_count == 1
 
 
-@pytest.mark.asyncio
-async def test_done_marker_present_skips_download(service, runtime, tmp_path, monkeypatch):
-    folder = _make_album_folder(tmp_path / "webp", "12345", "Cached", num_pages=10)
-    (folder / DONE_MARKER).touch()
-
-    download_spy = AsyncMock()
-    monkeypatch.setattr(jm_client, "download_with_retry", download_spy)
-
-    title = await service._ensure_title("12345", runtime)
-    assert title == "Cached"
-    download_spy.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_partial_cache_resumes_with_download(service, runtime, tmp_path, monkeypatch):
-    """Folder exists (from a previous failed attempt) but no .done — must re-download."""
-    folder = _make_album_folder(tmp_path / "webp", "12345", "Partial", num_pages=5)
-    # No .done marker.
-
-    fake_album = MagicMock()
-    fake_album.name = "Partial"
-    fake_album.page_count = 5  # matches actual on-disk count after re-download
-
-    monkeypatch.setattr(jm_client, "download_with_retry", AsyncMock(return_value=(fake_album, [])))
-
-    title = await service._ensure_title("12345", runtime)
-    assert title == "Partial"
-    assert (folder / DONE_MARKER).exists(), "marker must be written after successful resume"
-
-
-@pytest.mark.asyncio
-async def test_fresh_download_when_folder_absent(service, runtime, tmp_path, monkeypatch):
-    fake_album = MagicMock()
-    fake_album.name = "Fresh"
-    fake_album.page_count = 0
-
-    async def fake_download(album_id, opt, **kwargs):
-        # Simulate jmcomic creating the folder during download.
-        _make_album_folder(tmp_path / "webp", "12345", "Fresh", num_pages=3)
-        fake_album.page_count = 3
-        return fake_album, []
-
-    monkeypatch.setattr(jm_client, "download_with_retry", fake_download)
-
-    title = await service._ensure_title("12345", runtime)
-    assert title == "Fresh"
-    folder = tmp_path / "webp" / "[12345]Fresh"
-    assert (folder / DONE_MARKER).exists()
-
-
-@pytest.mark.asyncio
-async def test_partial_download_does_not_write_done(service, runtime, tmp_path, monkeypatch):
-    fake_album = MagicMock()
-    fake_album.name = "Truncated"
-    fake_album.page_count = 10  # claims 10 pages...
-
-    async def fake_download(album_id, opt, **kwargs):
-        # ...but only 4 written to disk
-        _make_album_folder(tmp_path / "webp", "12345", "Truncated", num_pages=4)
-        return fake_album, []
-
-    monkeypatch.setattr(jm_client, "download_with_retry", fake_download)
-
+async def test_incomplete_upstream_manifest_is_rejected(album_setup):
+    service, _, folder, _paths, download = album_setup
+    download.return_value.detail.page_count = 10
     with pytest.raises(PartialDownloadFailedException):
-        await service._ensure_title("12345", runtime)
+        await service.metadata("123")
+    assert not manifest_path(folder.parent, "123").exists()
 
-    folder = tmp_path / "webp" / "[12345]Truncated"
-    assert not (folder / DONE_MARKER).exists(), (
-        "marker must NOT be written when download is incomplete"
-    )
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+async def test_missing_and_corrupt_images_are_repaired(album_setup, damage):
+    service, _, _, paths, download = album_setup
+    await service.metadata("123")
+    if damage == "missing":
+        paths[0].unlink()
+    else:
+        paths[0].write_bytes(b"corrupt")
+
+    async def repair(*args, **kwargs):
+        assert not paths[0].exists()  # corrupt cached image must not be reused
+        Image.new("RGB", (17, 24), "blue").save(paths[0])
+        return download.return_value
+
+    download.side_effect = repair
+    repaired = await service.metadata("123")
+    assert repaired.total_pages == 2
+    assert download.await_count == 2

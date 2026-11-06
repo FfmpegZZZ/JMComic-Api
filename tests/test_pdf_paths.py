@@ -15,7 +15,14 @@ from jmcomic_api.services.pdf_paths import (
 
 @pytest.mark.parametrize(
     "raw,expected",
-    [("JM12345", "12345"), ("12345", "12345"), ("jm999", "999"), ("Jm7", "7"), ("777", "777")],
+    [
+        ("JM12345", "12345"),
+        ("12345", "12345"),
+        ("jm999", "999"),
+        ("Jm7", "7"),
+        ("777", "777"),
+        ("jM00123", "123"),
+    ],
 )
 def test_clean_album_id(raw, expected):
     assert clean_album_id(raw) == expected
@@ -68,3 +75,12 @@ def test_find_existing_returns_none_when_missing(tmp_path):
 
 def test_find_existing_returns_none_when_dir_absent(tmp_path):
     assert find_existing_album_title(tmp_path / "nope", "1") is None
+
+
+@pytest.mark.parametrize("raw", ["..", "jM", "-1", "1.5", "123abc", "١٢٣", " 123", "1/2"])
+def test_invalid_id_is_422(raw):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as error:
+        clean_album_id(raw)
+    assert error.value.status_code == 422

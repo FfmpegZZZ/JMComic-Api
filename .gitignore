@@ -30,3 +30,8 @@ webp/
 .DS_Store
 .idea/
 .vscode/
+
+.benchmark/
+benchmark-results/
+state/
+secrets/
