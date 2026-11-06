@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
+from curl_cffi.requests import Session
 from fastapi.testclient import TestClient
 
 # --- jmcomic page-like fakes -------------------------------------------------
@@ -44,6 +45,16 @@ def make_page():
 # --- FastAPI test fixtures --------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def block_upstream_requests(monkeypatch):
+    """Fail immediately if a test accidentally reaches the real JM upstream."""
+
+    def unexpected_request(self, *args, **kwargs):
+        raise AssertionError("Upstream network requests must be mocked in local tests")
+
+    monkeypatch.setattr(Session, "request", unexpected_request)
+
+
 @pytest.fixture
 def mock_runtime():
     runtime = MagicMock()
@@ -61,20 +72,22 @@ def app_with_mocks(mock_runtime, tmp_path, monkeypatch) -> Iterator:
     (tmp_path / "option.yml").write_text("dir_rule:\n  base_dir: ./webp\n")
     (tmp_path / "pdf").mkdir(exist_ok=True)
 
+    mock_runtime.opt.dir_rule.base_dir = str(tmp_path / "webp")
+    monkeypatch.setenv("JMAPI_PDF_SHARD_CACHE_DIR", str(tmp_path / "shards"))
+
     from jmcomic_api.deps import settings as settings_factory
 
     settings_factory.cache_clear()  # respect the new env vars
 
-    from jmcomic_api.app import create_app
+    from jmcomic_api import app as app_module
 
-    app = create_app()
+    app = app_module.create_app()
 
     # Replace the heavy parts before lifespan runs.
-    from jmcomic_api.services import jm_client as jm_mod
     from jmcomic_api.services.album import AlbumService
 
-    monkeypatch.setattr(jm_mod, "load_runtime", lambda _path: mock_runtime)
-    monkeypatch.setattr(jm_mod, "install_album_dirname_advice", lambda: None)
+    monkeypatch.setattr(app_module, "load_runtime", lambda _path: mock_runtime)
+    monkeypatch.setattr(app_module, "install_album_dirname_advice", lambda: None)
 
     yield app, mock_runtime, AlbumService
 

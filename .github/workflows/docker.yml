@@ -7,7 +7,11 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -21,6 +25,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify non-root runtime and storage permissions
+        run: |
+          docker build --target runtime -t jmapi-permissions .
+          docker run --rm --network none --entrypoint python jmapi-permissions -c 'import os,tempfile; assert os.geteuid() != 0; [tempfile.TemporaryFile(dir=p).close() for p in ("/app/pdf", "/app/webp", "/app/pdf_cache")]'
+
+      - name: Set up QEMU for ARM64 builds
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3

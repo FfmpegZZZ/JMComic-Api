@@ -8,8 +8,14 @@ services:
     volumes:
       - ./pdf:/app/pdf
       - ./webp:/app/webp
+      - ./pdf_cache:/app/pdf_cache
       - ./option.yml:/app/option.yml:ro
     environment:
       JMAPI_LOG_FORMAT: console
       JMAPI_LOG_LEVEL: INFO
+      JMAPI_MAX_CONCURRENT_BASE64: "${JMAPI_MAX_CONCURRENT_BASE64:-1}"
+      JMAPI_MAX_CONCURRENT_BASE64_STREAMS: "${JMAPI_MAX_CONCURRENT_BASE64_STREAMS:-4}"
+      JMAPI_RESPONSE_SEND_TIMEOUT_SECONDS: "${JMAPI_RESPONSE_SEND_TIMEOUT_SECONDS:-30}"
+    user: "${JMAPI_UID:-10001}:${JMAPI_GID:-10001}"
+    stop_grace_period: 40s
     restart: unless-stopped

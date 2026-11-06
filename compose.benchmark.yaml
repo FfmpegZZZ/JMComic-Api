@@ -1,0 +1,50 @@
+# Offline fixtures only. Loopback ports; no changes to the production service.
+services:
+  prepare:
+    image: jmcomic-api:bench-optimized
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: scripts/benchmark/Dockerfile
+    command: [python, /harness/prepare.py]
+    volumes:
+      - benchmark-data:/data
+      - ./scripts/benchmark:/harness:ro
+  baseline:
+    image: jmcomic-api:bench-baseline
+    pull_policy: never
+    build:
+      context: .benchmark/baseline
+      dockerfile: Dockerfile.benchmark
+    environment:
+      BENCH_VARIANT: baseline
+    init: true
+    ports: ["127.0.0.1:18700:8699"]
+    volumes:
+      - benchmark-data:/data
+      - ./scripts/benchmark:/harness:ro
+    cpus: 2
+    mem_limit: 2g
+    stop_grace_period: 40s
+  optimized:
+    image: jmcomic-api:bench-optimized
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: scripts/benchmark/Dockerfile
+    environment:
+      BENCH_VARIANT: optimized
+      JMAPI_JPEG_OPTIMIZE: "${JMAPI_JPEG_OPTIMIZE:-true}"
+      JMAPI_MAX_CONCURRENT_BASE64: "${JMAPI_MAX_CONCURRENT_BASE64:-1}"
+      JMAPI_MAX_CONCURRENT_BASE64_STREAMS: "${JMAPI_MAX_CONCURRENT_BASE64_STREAMS:-4}"
+      JMAPI_RESPONSE_SEND_TIMEOUT_SECONDS: "${JMAPI_RESPONSE_SEND_TIMEOUT_SECONDS:-30}"
+    init: true
+    ports: ["127.0.0.1:18701:8699"]
+    volumes:
+      - benchmark-data:/data
+      - ./scripts/benchmark:/harness:ro
+    cpus: 2
+    mem_limit: 2g
+    stop_grace_period: 40s
+volumes:
+  benchmark-data:

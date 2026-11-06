@@ -14,6 +14,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 from jmcomic.jm_exception import (
+    DownloadCancelledException,
     PartialDownloadFailedException,
     RequestRetryAllFailException,
 )
@@ -60,6 +61,19 @@ def test_local_file_missing_returns_500(client):
     )
     resp = tc.get("/get_pdf/123")
     assert resp.status_code == 500
+    _assert_unified(resp.json())
+
+
+def test_cancelled_download_returns_503_with_retry_after(client):
+    tc, _ = client
+    tc.app.state.album_service.get_or_build = AsyncMock(
+        side_effect=DownloadCancelledException("maintenance")
+    )
+
+    resp = tc.get("/get_pdf/123")
+    assert resp.status_code == 503
+    assert resp.headers["retry-after"] == "30"
+    assert resp.json()["message"] == "Download cancelled; try again later"
     _assert_unified(resp.json())
 
 

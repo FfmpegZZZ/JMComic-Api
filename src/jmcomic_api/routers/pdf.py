@@ -1,19 +1,20 @@
-"""Album → PDF endpoints. Streaming by default, base64 JSON via flag."""
+"""Legacy Base64 JSON endpoints with optional raw PDF file responses."""
 
 from __future__ import annotations
 
-import base64
 import math
 import os
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from jmcomic_api.deps import AlbumServiceDep, settings
 from jmcomic_api.services.album import AlbumService
+from jmcomic_api.services.auth import IdentityRoute
+from jmcomic_api.services.pdf_paths import clean_album_id
+from jmcomic_api.services.responses import LeasedFileResponse, base64_response
 
-router = APIRouter(tags=["pdf"])
+router = APIRouter(tags=["pdf"], route_class=IdentityRoute)
 
 
 def _normalize_passwd(value: str) -> bool:
@@ -52,9 +53,7 @@ def _resolve_quality(value: str | None) -> int | None:
     except ValueError as e:
         raise HTTPException(
             status_code=422,
-            detail=(
-                f"quality '{value}' invalid; expected small/medium/large or an integer 1-95"
-            ),
+            detail=(f"quality '{value}' invalid; expected small/medium/large or an integer 1-95"),
         ) from e
     if not (1 <= n <= 95):
         raise HTTPException(
@@ -68,6 +67,7 @@ def _resolve_quality(value: str | None) -> int | None:
 @router.get("/get_pdf/{album_id}")
 async def get_pdf_legacy(
     album_id: str,
+    request: Request,
     album_service: Annotated[AlbumService, AlbumServiceDep],
     settings_dep=Depends(settings),
     passwd: str = Query("true"),
@@ -82,7 +82,7 @@ async def get_pdf_legacy(
     ),
 ):
     artifact = await album_service.get_or_build(
-        album_id,
+        clean_album_id(album_id),
         settings_dep.pdf_path,
         enable_pwd=_normalize_passwd(passwd),
         title_type=Titletype,
@@ -92,24 +92,30 @@ async def get_pdf_legacy(
         raise HTTPException(status_code=404, detail="PDF 文件不存在")
 
     if pdf.lower() == "true":
-        return FileResponse(
+        return LeasedFileResponse(
             path=artifact.path,
-            media_type="application/pdf",
             filename=artifact.filename,
+            send_timeout=settings_dep.response_send_timeout_seconds,
         )
 
-    encoded = base64.b64encode(artifact.path.read_bytes()).decode("utf-8")
-    return {
-        "success": True,
-        "message": "PDF 获取成功",
-        "name": artifact.filename,
-        "data": encoded,
-    }
+    return await base64_response(
+        artifact.path,
+        {
+            "success": True,
+            "message": "PDF 获取成功",
+            "name": artifact.filename,
+        },
+        request.app.state.base64_stream_lane,
+        encoding_lane=request.app.state.base64_lane,
+        executor=request.app.state.blocking.encoding,
+        send_timeout=settings_dep.response_send_timeout_seconds,
+    )
 
 
 @router.get("/get_pdf_path/{album_id}")
 async def get_pdf_path_legacy(
     album_id: str,
+    request: Request,
     album_service: Annotated[AlbumService, AlbumServiceDep],
     settings_dep=Depends(settings),
     passwd: str = Query("true"),
@@ -123,7 +129,7 @@ async def get_pdf_path_legacy(
     ),
 ):
     artifact = await album_service.get_or_build(
-        album_id,
+        clean_album_id(album_id),
         settings_dep.pdf_path,
         enable_pwd=_normalize_passwd(passwd),
         title_type=Titletype,
@@ -143,6 +149,7 @@ async def get_pdf_path_legacy(
 @router.get("/pdf/info/{album_id}")
 async def pdf_shard_info(
     album_id: str,
+    request: Request,
     album_service: Annotated[AlbumService, AlbumServiceDep],
     settings_dep=Depends(settings),
 ):
@@ -163,7 +170,7 @@ async def pdf_shard_info(
         }
     """
     shard_size = settings_dep.pdf_shard_size
-    meta = await album_service.metadata(album_id)
+    meta = await album_service.metadata(clean_album_id(album_id))
     total = meta.total_pages
 
     if total == 0:
@@ -204,6 +211,7 @@ async def pdf_shard_info(
 @router.get("/pdf/shard/{album_id}/{shard_index}")
 async def pdf_shard(
     album_id: str,
+    request: Request,
     shard_index: int,
     album_service: Annotated[AlbumService, AlbumServiceDep],
     settings_dep=Depends(settings),
@@ -223,7 +231,7 @@ async def pdf_shard(
 
     try:
         artifact, total, start, end, title = await album_service.build_shard(
-            album_id,
+            clean_album_id(album_id),
             shard_index=shard_index,
             shard_size=settings_dep.pdf_shard_size,
             cache_dir=settings_dep.shard_cache_path,
@@ -236,20 +244,25 @@ async def pdf_shard(
         raise HTTPException(status_code=404, detail=str(e)) from e
 
     if pdf:
-        return FileResponse(
+        return LeasedFileResponse(
             path=artifact.path,
-            media_type="application/pdf",
             filename=artifact.filename,
+            send_timeout=settings_dep.response_send_timeout_seconds,
         )
 
-    encoded = base64.b64encode(artifact.path.read_bytes()).decode("utf-8")
-    return {
-        "success": True,
-        "message": "PDF shard generated successfully",
-        "title": title,
-        "shard_index": shard_index,
-        "total_pages": total,
-        "start_page": start,
-        "end_page": end,
-        "data": encoded,
-    }
+    return await base64_response(
+        artifact.path,
+        {
+            "success": True,
+            "message": "PDF shard generated successfully",
+            "title": title,
+            "shard_index": shard_index,
+            "total_pages": total,
+            "start_page": start,
+            "end_page": end,
+        },
+        request.app.state.base64_stream_lane,
+        encoding_lane=request.app.state.base64_lane,
+        executor=request.app.state.blocking.encoding,
+        send_timeout=settings_dep.response_send_timeout_seconds,
+    )

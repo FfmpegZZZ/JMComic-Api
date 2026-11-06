@@ -10,6 +10,7 @@ from PIL import Image
 from pypdf import PdfReader
 
 from jmcomic_api.services.album import AlbumImages, AlbumService
+from jmcomic_api.services.jm_client import JmRuntime
 
 
 def _make_real_album(tmp_path, num_pages: int = 12, album_id: str = "12345"):
@@ -66,13 +67,13 @@ def test_pdf_shard_streams_when_pdf_true(client, tmp_path):
     """End-to-end: build a real shard PDF off real webp files."""
     tc, _ = client
     cache_dir = tmp_path / "shards"
-    cache_dir.mkdir()
+    cache_dir.mkdir(exist_ok=True)
     tc.app.state.settings.pdf_shard_cache_dir = cache_dir
     tc.app.state.settings.pdf_shard_size = 5
 
     fake = _make_real_album(tmp_path, num_pages=12)
     # Use the real AlbumService so build_shard actually merges images.
-    real = AlbumService(runtime_provider=lambda: type("R", (), {"opt": None})())
+    real = AlbumService(runtime_provider=lambda: JmRuntime(opt=None, client=None))
     real.metadata = AsyncMock(return_value=fake)
     tc.app.state.album_service = real
 
@@ -91,12 +92,12 @@ def test_pdf_shard_streams_when_pdf_true(client, tmp_path):
 def test_pdf_shard_returns_base64_json_by_default(client, tmp_path):
     tc, _ = client
     cache_dir = tmp_path / "shards"
-    cache_dir.mkdir()
+    cache_dir.mkdir(exist_ok=True)
     tc.app.state.settings.pdf_shard_cache_dir = cache_dir
     tc.app.state.settings.pdf_shard_size = 5
 
     fake = _make_real_album(tmp_path, num_pages=8)
-    real = AlbumService(runtime_provider=lambda: type("R", (), {"opt": None})())
+    real = AlbumService(runtime_provider=lambda: JmRuntime(opt=None, client=None))
     real.metadata = AsyncMock(return_value=fake)
     tc.app.state.album_service = real
 
@@ -117,12 +118,12 @@ def test_pdf_shard_returns_base64_json_by_default(client, tmp_path):
 def test_pdf_shard_404_for_out_of_range(client, tmp_path):
     tc, _ = client
     cache_dir = tmp_path / "shards"
-    cache_dir.mkdir()
+    cache_dir.mkdir(exist_ok=True)
     tc.app.state.settings.pdf_shard_cache_dir = cache_dir
     tc.app.state.settings.pdf_shard_size = 5
 
     fake = _make_real_album(tmp_path, num_pages=8)
-    real = AlbumService(runtime_provider=lambda: type("R", (), {"opt": None})())
+    real = AlbumService(runtime_provider=lambda: JmRuntime(opt=None, client=None))
     real.metadata = AsyncMock(return_value=fake)
     tc.app.state.album_service = real
 
@@ -148,12 +149,12 @@ def test_pdf_shard_caches_second_request(client, tmp_path):
     """Second request to the same shard should reuse the cached file."""
     tc, _ = client
     cache_dir = tmp_path / "shards"
-    cache_dir.mkdir()
+    cache_dir.mkdir(exist_ok=True)
     tc.app.state.settings.pdf_shard_cache_dir = cache_dir
     tc.app.state.settings.pdf_shard_size = 5
 
     fake = _make_real_album(tmp_path, num_pages=8)
-    real = AlbumService(runtime_provider=lambda: type("R", (), {"opt": None})())
+    real = AlbumService(runtime_provider=lambda: JmRuntime(opt=None, client=None))
     real.metadata = AsyncMock(return_value=fake)
     tc.app.state.album_service = real
 
@@ -177,7 +178,7 @@ def test_shard_pdf_is_decryptable(tmp_path):
 
     fake = _make_real_album(tmp_path, num_pages=8, album_id="555")
     svc = AlbumService(
-        runtime_provider=lambda: type("R", (), {"opt": None})(),
+        runtime_provider=lambda: JmRuntime(opt=None, client=None),
         lock=KeyedAsyncLock(),
     )
     svc.metadata = AsyncMock(return_value=fake)

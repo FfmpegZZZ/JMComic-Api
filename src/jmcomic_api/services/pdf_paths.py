@@ -5,12 +5,19 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from fastapi import HTTPException
+
+from jmcomic_api.services.storage import confined
+
 _INVALID_NAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 
 def clean_album_id(raw: str) -> str:
     """Strip a leading ``JM`` prefix so ``JM12345`` and ``12345`` share a cache slot."""
-    return raw.removeprefix("JM").removeprefix("jm").removeprefix("Jm")
+    match = re.fullmatch(r"(?:jm)?([0-9]+)", str(raw), re.IGNORECASE)
+    if match is None:
+        raise HTTPException(422, "album_id must contain digits with an optional JM prefix")
+    return str(int(match.group(1)))
 
 
 def sanitize_filename(name: str) -> str:
@@ -39,7 +46,9 @@ def derive_pdf_filename(
 
 
 def webp_folder(base_dir: str | Path, album_id: str, title: str) -> Path:
-    return Path(base_dir) / f"[{album_id}]{title}"
+    return confined(
+        base_dir, Path(base_dir) / f"[{clean_album_id(album_id)}]{sanitize_filename(title)}"
+    )
 
 
 def find_existing_album_title(base_dir: str | Path, album_id: str) -> str | None:

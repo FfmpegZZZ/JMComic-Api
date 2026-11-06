@@ -39,13 +39,13 @@ class Settings(BaseSettings):
     slow_request_threshold_seconds: float = 5.0
 
     # ---- reliability knobs ------------------------------------------------
-    # Per-call timeouts (seconds). Reverse proxies should be configured
+    # Total operation budgets (seconds). Reverse proxies should be configured
     # with `proxy_read_timeout` >= download_timeout_seconds.
     download_timeout_seconds: float = Field(default=600, ge=1)
     pdf_build_timeout_seconds: float = Field(default=300, ge=1)
     metadata_timeout_seconds: float = Field(default=30, ge=1)
 
-    # tenacity retry budget for transient download failures.
+    # Async retry budget for transient download failures.
     download_retry_attempts: int = Field(default=3, ge=1)
     download_retry_initial_wait: float = Field(default=2, ge=0)
     download_retry_max_wait: float = Field(default=30, ge=0)
@@ -53,6 +53,30 @@ class Settings(BaseSettings):
     # Global concurrency cap on simultaneous album downloads (jmcomic mobile
     # API is sensitive to bursts — 3 is a sane default).
     max_concurrent_downloads: int = Field(default=3, ge=1)
+    max_concurrent_metadata: int = Field(default=8, ge=1)
+    max_concurrent_pdf_builds: int = Field(default=1, ge=1)
+    max_concurrent_base64: int = Field(default=1, ge=1)
+    max_concurrent_base64_streams: int = Field(default=4, ge=1)
+    response_send_timeout_seconds: float = Field(default=30, gt=0)
+    chapter_threads: int = Field(default=3, ge=1)
+    image_threads: int = Field(default=12, ge=1)
+    queue_capacity: int = Field(default=32, ge=0)
+    queue_timeout_seconds: float = Field(default=30, gt=0)
+    page_cache_mb: int = Field(default=512, ge=0)
+    jpeg_optimize: bool = True
+    query_cache_ttl_seconds: float = Field(default=0, ge=0)
+    detail_cache_ttl_seconds: float = Field(default=0, ge=0)
+    auth_enabled: bool = False
+    auth_state_dir: Path = Path("./state/sessions")
+    auth_key_file: Path | None = None
+    auth_session_ttl_seconds: int = Field(default=604800, ge=60)
+    auth_session_idle_seconds: int = Field(default=86400, ge=60)
+    auth_max_sessions: int = Field(default=256, ge=1)
+    auth_max_runtimes: int = Field(default=32, ge=1)
+    auth_login_timeout_seconds: float = Field(default=30, ge=1)
+    pdf_cache_ttl_seconds: float = Field(default=0, ge=0)
+    pdf_cache_max_mb: int = Field(default=0, ge=0)
+    cleanup_interval_seconds: float = Field(default=3600, gt=0)
 
     # Max time to wait for a per-album lock before giving up with 503.
     lock_acquire_timeout_seconds: float = Field(default=600, ge=1)

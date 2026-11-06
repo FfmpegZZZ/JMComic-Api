@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from jmcomic.jm_exception import (
+    DownloadCancelledException,
     MissingAlbumPhotoException,
     PartialDownloadFailedException,
     RequestRetryAllFailException,
@@ -27,7 +28,7 @@ from jmcomic_api.services import jm_client
 async def test_retries_partial_failure_and_eventually_succeeds(monkeypatch):
     counter = {"calls": 0}
 
-    def flaky(album_id, option):
+    def flaky(album_id, option, **kwargs):
         counter["calls"] += 1
         if counter["calls"] < 3:
             raise PartialDownloadFailedException("flaky", {})
@@ -54,7 +55,7 @@ async def test_retries_partial_failure_and_eventually_succeeds(monkeypatch):
 async def test_retries_request_retry_all_fail(monkeypatch):
     counter = {"calls": 0}
 
-    def flaky(album_id, option):
+    def flaky(album_id, option, **kwargs):
         counter["calls"] += 1
         if counter["calls"] < 2:
             raise RequestRetryAllFailException("upstream down", {})
@@ -71,7 +72,7 @@ async def test_retries_request_retry_all_fail(monkeypatch):
 async def test_does_not_retry_permanent_missing(monkeypatch):
     counter = {"calls": 0}
 
-    def always_missing(album_id, option):
+    def always_missing(album_id, option, **kwargs):
         counter["calls"] += 1
         raise MissingAlbumPhotoException("no such album", {})
 
@@ -89,7 +90,7 @@ async def test_does_not_retry_permanent_missing(monkeypatch):
 async def test_exhaustion_reraises_underlying_not_retry_error(monkeypatch):
     """``reraise=True`` semantics: caller sees the real exception type."""
 
-    def always_partial(album_id, option):
+    def always_partial(album_id, option, **kwargs):
         raise PartialDownloadFailedException("perma flaky", {})
 
     monkeypatch.setattr(jm_client, "download_album", always_partial)
@@ -102,7 +103,7 @@ async def test_exhaustion_reraises_underlying_not_retry_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_timeout_cancels_long_download(monkeypatch):
-    def slow(album_id, option):
+    def slow(album_id, option, **kwargs):
         time.sleep(2)  # simulate hung upstream
         return (MagicMock(name="A", page_count=1), [])
 
@@ -115,11 +116,28 @@ async def test_timeout_cancels_long_download(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_download_is_not_retried(monkeypatch):
+    calls = 0
+
+    def cancelled(album_id, option, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise DownloadCancelledException("maintenance")
+
+    monkeypatch.setattr(jm_client, "download_album", cancelled)
+    with pytest.raises(DownloadCancelledException):
+        await jm_client.download_with_retry(
+            "1", opt=None, timeout=5, max_attempts=3, initial_wait=0, max_wait=0
+        )
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_logger_emits_retry_event(monkeypatch, caplog):
     """Each retry should emit a structured ``download_retry_scheduled`` event."""
     counter = {"calls": 0}
 
-    def flaky(album_id, option):
+    def flaky(album_id, option, **kwargs):
         counter["calls"] += 1
         if counter["calls"] < 2:
             raise PartialDownloadFailedException("once", {})
