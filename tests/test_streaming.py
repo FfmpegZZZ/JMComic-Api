@@ -212,3 +212,23 @@ async def test_raw_pdf_conditional_requests_and_range(tmp_path):
         assert messages[0]["status"] == expected_status
         assert b"".join(message.get("body", b"") for message in messages) == expected_body
     assert leases.remove(path)
+
+
+async def test_raw_pdf_deletes_after_successful_response(tmp_path):
+    from jmcomic_api.services.responses import LeasedFileResponse
+
+    path = tmp_path / "delete-after-send.pdf"
+    path.write_bytes(b"pdf")
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    response = LeasedFileResponse(path, path.name, delete_after_send=True)
+    await response(
+        {"type": "http", "method": "GET", "headers": [], "asgi": {"spec_version": "2.4"}},
+        None,
+        send,
+    )
+    assert messages[0]["status"] == 200
+    assert not path.exists()

@@ -267,6 +267,8 @@ docker kill -s HUP jmcomic-api
 
 本轮任务、缓存、流式传输及新配置详见 [优化与迁移说明](docs/optimization.md)。Docker 本地测试及原版对比见 [运行步骤](docs/docker-comparison.md)。旧 PDF 按需迁移并默认保留，不需要清空缓存目录。
 
+PDF 文件在成功的 `pdf=true` 文件响应结束后默认自动删除；异常中断的 PDF 会由维护任务在默认 24 小时后清理。下载的原始图片也会默认保留 24 小时供重复请求复用，之后在没有活动文件租约时自动回收。可通过 `JMAPI_DELETE_PDF_AFTER_RESPONSE`、`JMAPI_PDF_CACHE_TTL_SECONDS` 和 `JMAPI_IMAGE_CACHE_TTL_SECONDS` 调整。
+
 上游请求、jmcomic 原生异步能力及后续实施顺序见 [上游网络优化评估](docs/upstream-review.md)。
 
 多用户登录、加密保存密码、每次读取个人资料重新登录，以及收藏和签到接口见 [个人账号说明](docs/personal-accounts.md)。功能默认关闭，按说明生成持久密钥后启用。

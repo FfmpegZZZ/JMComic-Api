@@ -139,7 +139,13 @@ def make_manifest(root: Path, album_id: str, title: str, paths: list[Path], expe
                 digest=digest_file(path),
             )
         )
-    if not entries or len(entries) != expected or len({e["path"] for e in entries}) != expected:
+    unique = len({e["path"] for e in entries})
+    if unique != len(entries):
+        raise ValueError(
+            f"image path collision: {len(entries)} pages share {unique} unique paths; "
+            "use a chapter-specific directory rule (Pid) and download again"
+        )
+    if not entries or len(entries) != expected:
         raise ValueError(f"incomplete image manifest: {len(entries)}/{expected}")
     data = dict(version=2, album_id=album_id, title=title, expected_pages=expected, entries=entries)
     # Attributes detect changes; content/order define PDF identity.
@@ -172,13 +178,26 @@ def validate_manifest(root: Path, data) -> bool:
         return False
 
 
-def cleanup(roots: list[Path], *, ttl=0, max_bytes=0):
-    """Only v2 PDFs are optional eviction candidates; never delete legacy files."""
+def cleanup(
+    roots: list[Path], *, ttl=0, max_bytes=0, image_roots=(), image_ttl=0
+):
+    """Remove idle generated PDFs and source images while honoring leases.
+
+    Args:
+        roots: Storage roots to scan for generated PDF artifacts.
+        ttl: Age in seconds after which generated PDFs may be removed.
+        max_bytes: Optional total PDF cache limit.
+        image_roots: Roots containing downloaded source images.
+        image_ttl: Age in seconds after which source images may be removed.
+    """
     now = time.time()
     candidates = []
+    image_root_set = {Path(root).resolve() for root in image_roots}
     for root in set(roots):
         if not root.exists():
             continue
+        root = root.resolve()
+        is_image_root = root in image_root_set
         for path in root.rglob("*"):
             try:
                 if path.is_symlink():
@@ -195,6 +214,19 @@ def cleanup(roots: list[Path], *, ttl=0, max_bytes=0):
                     continue
                 if not path.is_file():
                     continue
+                if (
+                    is_image_root
+                    and image_ttl
+                    and path.suffix.lower() in {".webp", ".jpg", ".jpeg", ".png"}
+                    # Windows may keep atime unchanged. Use the newest of
+                    # atime/mtime so cleanup remains portable while recent
+                    # accesses still refresh the retention window where the
+                    # filesystem supports it.
+                    and now - max(stat.st_atime, stat.st_mtime) > image_ttl
+                    and not leases.active_under(path)
+                ):
+                    leases.remove(path)
+                    continue
                 if path.name.startswith(".jmapi-") and path.name.endswith(".tmp"):
                     if now - stat.st_mtime > 86400 and not leases.active_under(path.parent):
                         leases.remove(path)
@@ -206,6 +238,13 @@ def cleanup(roots: list[Path], *, ttl=0, max_bytes=0):
                     candidates.append((stat.st_atime, stat.st_size, path))
             except OSError:
                 continue
+    for root in image_root_set:
+        if not root.exists():
+            continue
+        for folder in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
+            with contextlib.suppress(OSError):
+                if not leases.active_under(folder):
+                    folder.rmdir()
     total = sum(size for _, size, _ in candidates)
     for modified, size, path in sorted(candidates):
         if ((ttl and now - modified > ttl) or (max_bytes and total > max_bytes)) and leases.remove(

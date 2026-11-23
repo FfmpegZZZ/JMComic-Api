@@ -74,8 +74,15 @@ class Settings(BaseSettings):
     auth_max_sessions: int = Field(default=256, ge=1)
     auth_max_runtimes: int = Field(default=32, ge=1)
     auth_login_timeout_seconds: float = Field(default=30, ge=1)
-    pdf_cache_ttl_seconds: float = Field(default=0, ge=0)
+    # Generated PDFs are response artifacts. They are removed after a
+    # successful file response and this TTL cleans files left by interrupted
+    # clients or older deployments.
+    delete_pdf_after_response: bool = True
+    pdf_cache_ttl_seconds: float = Field(default=86400, ge=0)
     pdf_cache_max_mb: int = Field(default=0, ge=0)
+    # Original images are retained for one day so repeated requests can reuse
+    # the download, then reclaimed by the maintenance task when idle.
+    image_cache_ttl_seconds: float = Field(default=86400, ge=0)
     cleanup_interval_seconds: float = Field(default=3600, gt=0)
 
     # Max time to wait for a per-album lock before giving up with 503.

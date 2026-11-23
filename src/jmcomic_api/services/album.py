@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -290,17 +291,22 @@ class AlbumService:
                 t0 = time.monotonic()
                 pin = FilePin(output)
                 with leases.hold(output):
-                    await build_pdf_process(
-                        paths,
-                        output,
-                        password=password,
-                        jpeg_quality=variant["quality"],
-                        timeout=self._cfg.pdf_build_timeout_seconds,
-                        jpeg_optimize=self.settings.jpeg_optimize,
-                        page_cache_dir=str(self.settings.pdf_path / "v2" / "pages"),
-                        page_cache_bytes=self.settings.page_cache_mb * 1024**2,
-                        expected_digests=meta.digests[start - 1 : end] if meta.digests else None,
-                    )
+                    with ExitStack() as source_leases:
+                        for source in paths:
+                            source_leases.enter_context(leases.hold(source))
+                        await build_pdf_process(
+                            paths,
+                            output,
+                            password=password,
+                            jpeg_quality=variant["quality"],
+                            timeout=self._cfg.pdf_build_timeout_seconds,
+                            jpeg_optimize=self.settings.jpeg_optimize,
+                            page_cache_dir=str(self.settings.pdf_path / "v2" / "pages"),
+                            page_cache_bytes=self.settings.page_cache_mb * 1024**2,
+                            expected_digests=meta.digests[start - 1 : end]
+                            if meta.digests
+                            else None,
+                        )
                     entry = dict(
                         file=output.name,
                         attributes=file_attributes(output),

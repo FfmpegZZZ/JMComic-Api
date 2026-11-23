@@ -55,8 +55,19 @@ def not_modified(headers, etag, modified):
 
 
 class LeasedFileResponse(FileResponse):
-    def __init__(self, path: Path, filename: str, *, send_timeout=30):
+    def __init__(
+        self,
+        path: Path,
+        filename: str,
+        *,
+        send_timeout=30,
+        delete_after_send=False,
+        on_close=None,
+    ):
         self._send_timeout = send_timeout
+        self._delete_after_send = delete_after_send
+        self._on_close = on_close
+        self._path = path.resolve()
         self._lease = leases.hold(path)
         self._lease.__enter__()
         try:
@@ -82,6 +93,10 @@ class LeasedFileResponse(FileResponse):
                 await super().__call__(scope, receive, sending)
         finally:
             self._lease.__exit__(None, None, None)
+            if self._on_close is not None:
+                self._on_close()
+            if self._delete_after_send:
+                leases.remove(self._path)
 
 
 class PreparedBase64Response(StreamingResponse):

@@ -52,6 +52,15 @@ def test_runtime_and_album_directory_with_real_option(tmp_path, monkeypatch):
     assert album.page_count == 2
     assert album.tags == ["test"]
 
+    from jmcomic import JmPhotoDetail
+
+    first = JmPhotoDetail("101", "chapter one", "12345", 1)
+    second = JmPhotoDetail("102", "chapter two", "12345", 2)
+    directory = runtime.opt.dir_rule
+    assert directory.rule_dsl == "Bd_Ajmbook_Pid"
+    assert directory.decide_image_save_dir(album, first) != directory.decide_image_save_dir(album, second)
+    runtime.retire()
+
 
 def test_search_adapter_with_real_signature_and_page(client):
     tc, runtime = client

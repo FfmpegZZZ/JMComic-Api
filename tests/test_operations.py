@@ -47,6 +47,30 @@ def test_low_disk_admission_and_cleanup_leases(tmp_path, monkeypatch):
     assert error.value.headers["Retry-After"] == "30"
 
 
+def test_cleanup_reclaims_idle_source_images_but_honors_leases(tmp_path):
+    from PIL import Image
+
+    image_root = tmp_path / "webp"
+    image_root.mkdir()
+    idle = image_root / "idle.webp"
+    active = image_root / "active.webp"
+    Image.new("RGB", (1, 1), "white").save(idle)
+    Image.new("RGB", (1, 1), "black").save(active)
+    old = time.time() - 90000
+    import os
+
+    os.utime(idle, (old, old))
+    os.utime(active, (old, old))
+
+    with leases.hold(active):
+        cleanup([image_root], image_roots=[image_root], image_ttl=1)
+        assert idle.exists() is False
+        assert active.exists()
+
+    cleanup([image_root], image_roots=[image_root], image_ttl=1)
+    assert active.exists() is False
+
+
 def test_path_confinement_blocks_symlinks(tmp_path):
     root, outside = tmp_path / "root", tmp_path / "outside"
     root.mkdir()

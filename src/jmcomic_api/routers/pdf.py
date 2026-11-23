@@ -8,7 +8,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from jmcomic_api.deps import AlbumServiceDep, settings
+from jmcomic_api.deps import AlbumServiceDep, get_runtime, settings
+from jmcomic_api.services import jm_client
 from jmcomic_api.services.album import AlbumService
 from jmcomic_api.services.auth import IdentityRoute
 from jmcomic_api.services.pdf_paths import clean_album_id
@@ -96,6 +97,7 @@ async def get_pdf_legacy(
             path=artifact.path,
             filename=artifact.filename,
             send_timeout=settings_dep.response_send_timeout_seconds,
+            delete_after_send=settings_dep.delete_pdf_after_response,
         )
 
     return await base64_response(
@@ -155,7 +157,7 @@ async def pdf_shard_info(
 ):
     """Resolve total page count and shard layout for an album.
 
-    The album is downloaded if not yet present. Shard size is server-configured
+    Only upstream album metadata is read; images are not downloaded. Shard size is server-configured
     (``JMAPI_PDF_SHARD_SIZE``, default 100). Returns a JSON like::
 
         {
@@ -170,15 +172,28 @@ async def pdf_shard_info(
         }
     """
     shard_size = settings_dep.pdf_shard_size
-    meta = await album_service.metadata(clean_album_id(album_id))
-    total = meta.total_pages
+    album_id = clean_album_id(album_id)
+    runtime = get_runtime(request)
+    meta = await request.app.state.queries.run(
+        ("detail", album_id),
+        lambda job: jm_client.get_album_detail(
+            runtime.client, album_id,
+            timeout=settings_dep.metadata_timeout_seconds, job=job,
+            executor=request.app.state.blocking.metadata,
+        ),
+        runtime=runtime,
+        ttl=settings_dep.detail_cache_ttl_seconds,
+    )
+    if not meta:
+        raise HTTPException(404, "Album not found")
+    total = int(meta.page_count)
 
     if total == 0:
         return {
             "success": True,
             "message": "Album found, but contains no images.",
             "data": {
-                "jm_album_id": meta.album_id,
+                "jm_album_id": album_id,
                 "title": meta.title,
                 "total_pages": 0,
                 "shard_size": shard_size,
@@ -199,7 +214,7 @@ async def pdf_shard_info(
         "success": True,
         "message": "PDF shard info retrieved successfully",
         "data": {
-            "jm_album_id": meta.album_id,
+            "jm_album_id": album_id,
             "title": meta.title,
             "total_pages": total,
             "shard_size": shard_size,
@@ -248,6 +263,7 @@ async def pdf_shard(
             path=artifact.path,
             filename=artifact.filename,
             send_timeout=settings_dep.response_send_timeout_seconds,
+            delete_after_send=settings_dep.delete_pdf_after_response,
         )
 
     return await base64_response(

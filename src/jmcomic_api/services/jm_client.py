@@ -100,6 +100,13 @@ def runtime_from_data(
     data: dict, option_file: str | Path, *, anonymous=False, policy=None
 ) -> JmRuntime:
     data = copy.deepcopy(data)
+    # Chapters restart image numbering. A flat album directory overwrites
+    # unrelated pages and can never produce a trustworthy download manifest.
+    directory = data.setdefault("dir_rule", {})
+    rule = directory.get("rule", "Bd_Ajmbook")
+    if "Pid" not in rule.split("_"):
+        directory["rule"] = f"{rule}_Pid"
+        logger.warning("chapter_directory_added", previous_rule=rule, rule=directory["rule"])
     if anonymous:
         data["auth"] = {}
         # Managed identities must never inherit credentials or login hooks.

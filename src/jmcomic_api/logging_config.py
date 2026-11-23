@@ -53,6 +53,12 @@ def configure(log_format: str = "console", level: str = "INFO") -> None:
     root.addHandler(handler)
     root.setLevel(log_level)
 
+    # jmcomic installs its own stdout handler at import time. Propagating the
+    # same records to our root handler otherwise writes every image log twice.
+    upstream = logging.getLogger("jmcomic")
+    upstream.handlers.clear()
+    upstream.propagate = True
+
     # Quiet noisy libraries
     for noisy in ("urllib3", "asyncio", "watchfiles"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

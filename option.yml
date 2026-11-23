@@ -5,7 +5,7 @@ log: true
 # 下载文件夹
 dir_rule:
   base_dir: ./webp
-  rule: Bd_Ajmbook
+  rule: Bd_Ajmbook_Pid
 
 # plugins:
 #   after_album:

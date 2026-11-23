@@ -56,6 +56,15 @@ async def test_incomplete_upstream_manifest_is_rejected(album_setup):
     assert not manifest_path(folder.parent, "123").exists()
 
 
+async def test_cross_chapter_duplicate_paths_are_rejected_with_diagnostic(album_setup):
+    service, _, folder, paths, download = album_setup
+    album = download.return_value.detail
+    download.return_value = download_result(album, [paths[0], paths[0]])
+    with pytest.raises(PartialDownloadFailedException, match="image path collision"):
+        await service.metadata("123")
+    assert not manifest_path(folder.parent, "123").exists()
+
+
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
 async def test_missing_and_corrupt_images_are_repaired(album_setup, damage):
     service, _, _, paths, download = album_setup

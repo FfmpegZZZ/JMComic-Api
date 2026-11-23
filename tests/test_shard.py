@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -30,8 +31,9 @@ def _make_real_album(tmp_path, num_pages: int = 12, album_id: str = "12345"):
 
 def test_pdf_info_returns_shards(client, monkeypatch):
     tc, _ = client
-    fake = _make_real_album(tc.app.state.settings.pdf_path.parent, num_pages=237)
-    tc.app.state.album_service.metadata = AsyncMock(return_value=fake)
+    tc.app.state.queries.run = AsyncMock(
+        return_value=SimpleNamespace(title="Test Album", page_count=237)
+    )
 
     resp = tc.get("/pdf/info/12345")
     assert resp.status_code == 200
@@ -47,14 +49,14 @@ def test_pdf_info_returns_shards(client, monkeypatch):
         {"shard_index": 2, "start_page": 101, "end_page": 200},
         {"shard_index": 3, "start_page": 201, "end_page": 237},
     ]
+    tc.app.state.album_service.metadata.assert_not_called()
 
 
 def test_pdf_info_handles_empty_album(client):
     tc, _ = client
-    empty = AlbumImages(
-        album_id="999", title="Empty", folder=tc.app.state.settings.pdf_path, images=[]
+    tc.app.state.queries.run = AsyncMock(
+        return_value=SimpleNamespace(title="Empty", page_count=0)
     )
-    tc.app.state.album_service.metadata = AsyncMock(return_value=empty)
 
     resp = tc.get("/pdf/info/999")
     assert resp.status_code == 200

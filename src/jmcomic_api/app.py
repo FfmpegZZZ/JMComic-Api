@@ -146,6 +146,9 @@ def create_app() -> FastAPI:
             lock_timeout=cfg.lock_acquire_timeout_seconds,
             settings=cfg,
         )
+        from jmcomic_api.services.pdf_jobs import PdfJobs
+
+        app.state.pdf_jobs = PdfJobs(manager, app.state.album_service, cfg)
         logger.info(
             "startup_complete",
             version=__version__,
@@ -204,11 +207,15 @@ def create_app() -> FastAPI:
                 try:
                     if app.state.auth is not None:
                         await app.state.auth.maintenance()
+                    app.state.pdf_jobs.prune()
+                    image_root = Path(app.state.runtime.opt.dir_rule.base_dir).resolve()
                     await asyncio.to_thread(
                         cleanup,
                         roots,
                         ttl=cfg.pdf_cache_ttl_seconds,
                         max_bytes=cfg.pdf_cache_max_mb * 1024**2,
+                        image_roots=[image_root],
+                        image_ttl=cfg.image_cache_ttl_seconds,
                     )
                 except OSError as error:
                     logger.warning("storage_cleanup_failed", error=str(error))
@@ -279,6 +286,9 @@ def create_app() -> FastAPI:
     register_handlers(app)
     app.include_router(health_router.router)
     app.include_router(pdf_router.router)
+    from jmcomic_api.routers import pdf_jobs
+
+    app.include_router(pdf_jobs.router)
     app.include_router(catalog_router.router)
     app.include_router(auth_router.router)
 
